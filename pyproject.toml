@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "orca-result-analyzer-rust-plugin"
+version = "1.0.0"
+description = "ORCA Result Analyzer Plugin with Rust-powered parser for MoleditPy"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "HiroYokoyama" }]
+dependencies = [
+    "PyQt6",
+    "numpy",
+    "matplotlib",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "orca_result_analyzer_rust.orca_parser_rs"
+python-source = "."
