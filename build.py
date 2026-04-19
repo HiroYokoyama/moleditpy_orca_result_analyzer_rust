@@ -100,13 +100,15 @@ def main():
     # wheel name: <dist>-<ver>-<pytag>-<abitag>-<platform>.whl
     parts = wheel_stem.split("-")
     if len(parts) >= 5:
+        version_tag = parts[1]               # e.g. 2.4.1
         platform_tag = "-".join(parts[2:])   # e.g. cp313-cp313-win_amd64
     else:
+        version_tag = "unknown"
         platform_tag = "unknown"
 
     # Package the plugin folder as a zip for the MoleditPy plugin system
     import zipfile as _zf
-    zip_name = f"orca_result_analyzer_rust-{platform_tag}.zip"
+    zip_name = f"orca_result_analyzer_rust-{version_tag}-{platform_tag}.zip"
     zip_path = os.path.join(BUILD_DIR, zip_name)
     pkg_name = os.path.basename(PKG_DIR)
     with _zf.ZipFile(zip_path, "w", _zf.ZIP_DEFLATED) as zf:
