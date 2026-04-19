@@ -95,9 +95,19 @@ def main():
                 shutil.copyfileobj(src, dst)
             print(f"Copied  {os.path.basename(ext_name)}  →  orca_result_analyzer/")
 
+    # Derive platform tag from the wheel name, e.g. cp313-cp313-win_amd64
+    wheel_stem = os.path.splitext(os.path.basename(wheel))[0]  # strip .whl
+    # wheel name: <dist>-<ver>-<pytag>-<abitag>-<platform>.whl
+    parts = wheel_stem.split("-")
+    if len(parts) >= 5:
+        platform_tag = "-".join(parts[2:])   # e.g. cp313-cp313-win_amd64
+    else:
+        platform_tag = "unknown"
+
     # Package the plugin folder as a zip for the MoleditPy plugin system
     import zipfile as _zf
-    zip_path = os.path.join(BUILD_DIR, "orca_result_analyzer_rust.zip")
+    zip_name = f"orca_result_analyzer_rust-{platform_tag}.zip"
+    zip_path = os.path.join(BUILD_DIR, zip_name)
     pkg_name = os.path.basename(PKG_DIR)
     with _zf.ZipFile(zip_path, "w", _zf.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(PKG_DIR):
@@ -109,7 +119,7 @@ def main():
                 full = os.path.join(root, fname)
                 arcname = os.path.join(pkg_name, os.path.relpath(full, PKG_DIR))
                 zf.write(full, arcname)
-    print(f"Plugin zip:  {os.path.basename(zip_path)}  →  build/")
+    print(f"Plugin zip:  {zip_name}  →  build/")
 
     print("\nDone. The Rust parser is ready.")
 
