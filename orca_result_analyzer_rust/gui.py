@@ -48,7 +48,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.file_path = file_path
         self.context = context
 
-        self.setWindowTitle(f"ORCA Result Analyzer (v{PLUGIN_VERSION})")
+        self.setWindowTitle(f"ORCA Result Analyzer — Rust Edition (v{PLUGIN_VERSION})")
         self.resize(450, 600)
 
         # self.logger = Logger.get_logger("OrcaResultAnalyzerDialog")
