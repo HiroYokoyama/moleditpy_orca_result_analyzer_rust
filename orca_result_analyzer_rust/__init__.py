@@ -1,5 +1,5 @@
 PLUGIN_NAME = "ORCA Result Analyzer (Rust)"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "2.4.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Comprehensive analyzer for ORCA output files (.out) with Rust-powered parser. Includes Vibrational, MO, TDDFT, and NMR analysis."
 
