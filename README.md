@@ -138,7 +138,7 @@ end
 ## Repository structure
 
 ```
-moleditpy_orca_result_analyzer_rust_plugin/
+moleditpy_orca_result_analyzer_rust/
 ├── Cargo.toml               Rust package manifest
 ├── pyproject.toml           maturin build config (not for PyPI)
 ├── build.py                 Build script
