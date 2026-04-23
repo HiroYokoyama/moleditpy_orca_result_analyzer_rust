@@ -10,13 +10,30 @@ and analysis modules work without modification.
 """
 
 import logging
+import os
 
 try:
     from . import orca_parser_rs as _rs
     _RUST_AVAILABLE = True
-except ImportError:
-    _rs = None
-    _RUST_AVAILABLE = False
+except (ImportError, SystemError):
+    # Fallback: direct file loading (e.g. tests load parser.py without package context)
+    try:
+        import importlib.util as _ilu
+        _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        _exts = [f for f in os.listdir(_pkg_dir)
+                 if "orca_parser_rs" in f and f.endswith((".pyd", ".so"))]
+        if _exts:
+            _spec = _ilu.spec_from_file_location("orca_parser_rs",
+                                                  os.path.join(_pkg_dir, _exts[0]))
+            _rs = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_rs)
+            _RUST_AVAILABLE = True
+        else:
+            _rs = None
+            _RUST_AVAILABLE = False
+    except Exception:
+        _rs = None
+        _RUST_AVAILABLE = False
 
 
 def _rust_required():

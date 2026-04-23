@@ -44,11 +44,11 @@ def _load_init_module():
         os.path.join(_SRC_DIR, "orca_result_analyzer_rust", "__init__.py")
     )
     spec = importlib.util.spec_from_file_location(
-        "orca_result_analyzer_rust_init", init_src
+        "orca_result_analyzer_init", init_src
     )
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = "orca_result_analyzer_rust"
-    sys.modules["orca_result_analyzer_rust_init"] = mod
+    sys.modules["orca_result_analyzer_init"] = mod
     spec.loader.exec_module(mod)
     return mod
 

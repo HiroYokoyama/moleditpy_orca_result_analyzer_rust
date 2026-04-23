@@ -738,7 +738,7 @@ impl<'a> OrcaRustParser<'a> {
         });
         if let Some(i) = final_eval_idx {
             let mut final_en = 0.0_f64;
-            for k in i..self.len().min(i + 300) {
+            for k in i..self.len().min(i + 1500) {
                 let uu_k = self.get(k).to_uppercase();
                 if uu_k.contains("FINAL SINGLE POINT ENERGY") {
                     if let Some(v) = self.get(k).split_whitespace().last().and_then(parse_f64) {

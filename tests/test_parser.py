@@ -2,19 +2,30 @@
 tests/test_parser.py
 Unit tests for OrcaParser (orca_result_analyzer_rust/parser.py).
 
-The Rust extension (orca_parser_rs) must have been compiled with
-`python build.py` before running these tests.
+parser.py imports only `re` and `logging` — no Qt, no third-party deps —
+so OrcaParser is loaded directly without any stubs.
 """
 
 import os
 import sys
+import importlib.util
 import unittest
 
-_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
+_PARSER_SRC = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "orca_result_analyzer_rust", "parser.py")
+)
 
-from orca_result_analyzer_rust.parser import OrcaParser  # noqa: E402
+
+def _load_parser():
+    spec = importlib.util.spec_from_file_location("orca_parser_standalone", _PARSER_SRC)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["orca_parser_standalone"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_parser_mod = _load_parser()
+OrcaParser = _parser_mod.OrcaParser
 
 
 # ---------------------------------------------------------------------------

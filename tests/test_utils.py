@@ -1,6 +1,6 @@
 """
 tests/test_utils.py
-Unit tests for orca_result_analyzer/utils.py (pure Python, no stubs required).
+Unit tests for orca_result_analyzer_rust/utils.py (pure Python, no stubs required).
 """
 
 import os

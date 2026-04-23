@@ -3,19 +3,29 @@ tests/test_parser_extended.py
 Extended parser tests — thermal, orbital energies, IR/Raman spectra,
 Mayer charges, scan results table, and recalc_energies.
 
-The Rust extension (orca_parser_rs) must have been compiled with
-`python build.py` before running these tests.
+All tests load OrcaParser directly (no Qt stubs required).
 """
 
 import os
 import sys
+import importlib.util
 import unittest
 
-_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
+_PARSER_SRC = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "orca_result_analyzer_rust", "parser.py")
+)
 
-from orca_result_analyzer_rust.parser import OrcaParser  # noqa: E402
+
+def _load_parser():
+    spec = importlib.util.spec_from_file_location("orca_parser_ext", _PARSER_SRC)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["orca_parser_ext"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_parser_mod = _load_parser()
+OrcaParser = _parser_mod.OrcaParser
 
 
 def _parse_method(content, method_name):
