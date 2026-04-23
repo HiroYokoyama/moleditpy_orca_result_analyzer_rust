@@ -1,0 +1,16 @@
+[package]
+name        = "orca-parser-rs"
+version     = "2.5.1"
+edition     = "2021"
+description = "Rust-powered ORCA output parser for MoleditPy"
+authors     = ["HiroYokoyama"]
+
+[lib]
+name        = "orca_parser_rs"
+crate-type  = ["cdylib"]
+path        = "src/parser.rs"
+
+[dependencies]
+pyo3      = { workspace = true }
+regex     = { workspace = true }
+once_cell = { workspace = true }

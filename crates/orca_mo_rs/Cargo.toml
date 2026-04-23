@@ -1,0 +1,14 @@
+[package]
+name        = "orca-mo-rs"
+version     = "2.5.1"
+edition     = "2021"
+description = "Rust-powered GTO basis set evaluation for MO cube generation"
+authors     = ["HiroYokoyama"]
+
+[lib]
+name       = "orca_mo_rs"
+crate-type = ["cdylib"]
+path       = "src/mo_engine.rs"
+
+[dependencies]
+pyo3 = { workspace = true }

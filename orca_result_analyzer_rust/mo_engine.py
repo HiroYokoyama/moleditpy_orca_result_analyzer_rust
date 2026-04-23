@@ -8,16 +8,16 @@ import traceback
 # ---------------------------------------------------------------------------
 _rs = None
 try:
-    from . import orca_parser_rs as _rs
+    from . import orca_mo_rs as _rs
 except (ImportError, SystemError):
     try:
         import importlib.util as _ilu
         _pkg_dir = os.path.dirname(os.path.abspath(__file__))
         _exts = [f for f in os.listdir(_pkg_dir)
-                 if "orca_parser_rs" in f and f.endswith((".pyd", ".so"))]
+                 if "orca_mo_rs" in f and f.endswith((".pyd", ".so"))]
         if _exts:
             _spec = _ilu.spec_from_file_location(
-                "orca_parser_rs", os.path.join(_pkg_dir, _exts[0])
+                "orca_mo_rs", os.path.join(_pkg_dir, _exts[0])
             )
             _rs = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_rs)
@@ -26,7 +26,7 @@ except (ImportError, SystemError):
 
 if _rs is None or not hasattr(_rs, "BasisSetEngineRust"):
     raise ImportError(
-        "orca_parser_rs.BasisSetEngineRust not found. "
+        "orca_mo_rs.BasisSetEngineRust not found. "
         "Rebuild the Rust extension with 'python build.py --release'."
     )
 
