@@ -11,4 +11,5 @@ crate-type = ["cdylib"]
 path       = "src/mo_engine.rs"
 
 [dependencies]
-pyo3 = { workspace = true }
+pyo3  = { workspace = true }
+rayon = { workspace = true }
