@@ -38,7 +38,7 @@ except ImportError:
     try:
         from mo_engine import BasisSetEngine, CalcWorker
         from vis import CubeVisualizer
-    except:
+    except Exception:
         BasisSetEngine = None
         CalcWorker = None
         CubeVisualizer = None
@@ -311,11 +311,10 @@ class MODialog(QDialog):
                     if "_" in str(k):
                         idx_s, spin_s = str(k).split("_")
 
-                        s_val = 0
                         if spin_s == "alpha":
-                            s_val = 1
+                            pass
                         else:
-                            s_val = 0  # beta comes first in sorted list -> appears later in reverse iteration -> appears LOWER in UI?
+                            pass  # beta comes first in sorted list -> appears later in reverse iteration -> appears LOWER in UI?
 
                         # So we need CUSTOM sort where Beta < Alpha.
                         s_priority = 0 if spin_s == "beta" else 1

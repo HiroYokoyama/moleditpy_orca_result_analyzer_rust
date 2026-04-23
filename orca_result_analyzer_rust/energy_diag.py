@@ -335,7 +335,6 @@ class EnergyDiagramDialog(QDialog):
             self.status_label.setText(f"File not found: {label}")
             # User Request: Use orbital number for label
             # Use safe 0-based syntax for worker
-            mo_task_label = f"#{index}"
 
             # User Request: Confirm dialog "same with the rest"
             reply = QMessageBox.question(
@@ -540,7 +539,7 @@ class EnergyDiagramDialog(QDialog):
                 step = 2 * magnitude
             else:
                 step = magnitude
-        except:
+        except Exception:
             step = 1.0
 
         if step <= 0:

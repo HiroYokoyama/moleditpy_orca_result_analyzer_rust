@@ -202,5 +202,5 @@ class ThermalTableDialog(QDialog):
                     self.parent().mw.statusBar().showMessage(
                         f"Data exported to {path}", 5000
                     )
-            except Exception as e:
+            except Exception:
                 pass  # Simple error handling

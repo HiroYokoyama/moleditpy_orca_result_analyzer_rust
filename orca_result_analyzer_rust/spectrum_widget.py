@@ -127,19 +127,19 @@ class SpectrumWidget(QWidget):
     def set_sticks(self, state):
         from PyQt6.QtCore import Qt
 
-        self.show_sticks = state == Qt.CheckState.Checked.value or state == True
+        self.show_sticks = state == Qt.CheckState.Checked.value or state
         self.plot_spectrum()
 
     def set_gaussian(self, state):
         from PyQt6.QtCore import Qt
 
-        self.show_gaussian = state == Qt.CheckState.Checked.value or state == True
+        self.show_gaussian = state == Qt.CheckState.Checked.value or state
         self.plot_spectrum()
 
     def set_markers(self, state):
         from PyQt6.QtCore import Qt
 
-        self.show_markers = state == Qt.CheckState.Checked.value or state == True
+        self.show_markers = state == Qt.CheckState.Checked.value or state
         self.plot_spectrum()
 
     def save_png(self, path):
@@ -258,7 +258,7 @@ class SpectrumWidget(QWidget):
                 for x, y in points:
                     writer.writerow([x, y])
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     def set_scaling(self, factor):

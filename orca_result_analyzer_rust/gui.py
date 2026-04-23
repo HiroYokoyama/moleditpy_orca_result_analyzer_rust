@@ -10,9 +10,30 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QMenuBar,
     QFileDialog,
+    QSizePolicy,
 )
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, Qt
+
+class ElidedLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = text
+        super().setText(text)
+        
+    def setText(self, text):
+        self._full_text = text
+        self._update_elided_text()
+        
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elided_text()
+        
+    def _update_elided_text(self):
+        fm = self.fontMetrics()
+        # Elide in the middle to show start and end of path
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideMiddle, self.width())
+        super().setText(elided)
 
 try:
     from rdkit import Chem
@@ -123,12 +144,21 @@ class OrcaResultAnalyzerDialog(QDialog):
         )
         file_info_layout.addWidget(lbl_current)
 
-        self.lbl_file_path = QLabel(self.file_path)
+        self.lbl_file_path = QLabel(os.path.basename(self.file_path))
         self.lbl_file_path.setStyleSheet(
-            "color: #0066cc; font-size: 9pt; background: transparent; border: none; padding: 0;"
+            "color: #0066cc; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
         )
+        self.lbl_file_path.setToolTip(self.file_path)
         self.lbl_file_path.setWordWrap(True)
         file_info_layout.addWidget(self.lbl_file_path)
+
+        self.lbl_file_dir = ElidedLabel(os.path.dirname(self.file_path))
+        self.lbl_file_dir.setStyleSheet(
+            "color: #0066cc; font-size: 9pt; background: transparent; border: none; padding: 0;"
+        )
+        self.lbl_file_dir.setToolTip(self.file_path)
+        self.lbl_file_dir.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        file_info_layout.addWidget(self.lbl_file_dir)
 
         # Updated Time Label
         self.lbl_updated = QLabel("Updated: ---")
@@ -477,7 +507,11 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "lbl_file_path", None) is None:
             return
 
-        self.lbl_file_path.setText(self.file_path)
+        self.lbl_file_path.setText(os.path.basename(self.file_path))
+        self.lbl_file_path.setToolTip(self.file_path)
+        if getattr(self, "lbl_file_dir", None) is not None:
+            self.lbl_file_dir.setText(os.path.dirname(self.file_path))
+            self.lbl_file_dir.setToolTip(self.file_path)
 
         # Updated Time
         mtime_str = "---"
@@ -666,7 +700,7 @@ class OrcaResultAnalyzerDialog(QDialog):
                     self.mw.view_3d_manager.plotter.render()
                 except Exception as _e:
                     logging.warning("[gui.py:592] silenced: %s", _e)
-        except Exception as e:
+        except Exception:
             # self.logger.error(f"Error loading 3D: {e}")
             # print(f"Error loading 3D: {e}")
             import traceback

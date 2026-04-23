@@ -20,7 +20,7 @@ try:
 except ImportError:
     try:
         from spectrum_widget import SpectrumWidget
-    except:
+    except Exception:
         SpectrumWidget = None
 from .utils import get_default_export_path
 import logging
@@ -678,7 +678,7 @@ class TDDFTDialog(QDialog):
         rot_vel = item.get("rot_vel", 0.0)
 
         if not is_cd:
-            msg += f"Oscillator Strength (f):\n"
+            msg += "Oscillator Strength (f):\n"
             msg += (
                 f"  - Length   : {osc_len:.6f}"
                 + (" *" if gauge_mode == 0 else "")
@@ -690,7 +690,7 @@ class TDDFTDialog(QDialog):
                 + "\n"
             )
         else:
-            msg += f"Rotatory Strength (R) [10⁻⁴⁰ esu² cm²]:\n"
+            msg += "Rotatory Strength (R) [10⁻⁴⁰ esu² cm²]:\n"
             msg += (
                 f"  - Length   : {rot_len:.6f}"
                 + (" *" if gauge_mode == 0 else "")

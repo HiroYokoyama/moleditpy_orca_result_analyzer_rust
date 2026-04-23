@@ -731,6 +731,45 @@ impl<'a> OrcaRustParser<'a> {
                 }
             }
         }
+
+        // Append "opt_final" step from FINAL ENERGY EVALUATION AT THE STATIONARY POINT
+        let final_eval_idx = self.lines.iter().position(|l| {
+            l.to_uppercase().contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
+        });
+        if let Some(i) = final_eval_idx {
+            let mut final_en = 0.0_f64;
+            for k in i..self.len().min(i + 300) {
+                let uu_k = self.get(k).to_uppercase();
+                if uu_k.contains("FINAL SINGLE POINT ENERGY") {
+                    if let Some(v) = self.get(k).split_whitespace().last().and_then(parse_f64) {
+                        final_en = v;
+                    }
+                    break;
+                }
+            }
+            let (f_atoms, f_coords, f_found) = self.read_coords_from(i);
+            if f_found {
+                let last_cycle = data.scan_steps.iter()
+                    .filter(|s| s.step_type == "opt_cycle")
+                    .map(|s| s.step)
+                    .max()
+                    .unwrap_or(0);
+                let current_scan_step = data.scan_steps.last()
+                    .and_then(|s| s.scan_step_id);
+                data.scan_steps.push(ScanStep {
+                    step_type: "opt_final".to_string(),
+                    scan_step_id: current_scan_step,
+                    step: last_cycle + 1,
+                    energy: final_en,
+                    scan_coord: None,
+                    dist: None,
+                    atoms: f_atoms,
+                    coords: f_coords,
+                    convergence: HashMap::new(),
+                    gradients: Vec::new(),
+                });
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1545,16 +1584,24 @@ impl<'a> OrcaRustParser<'a> {
                 if let (Some(x), Some(y), Some(z)) =
                     (parse_f64(parts[0]), parse_f64(parts[1]), parse_f64(parts[2]))
                 {
-                    let mag = if idx + 1 < self.len() {
-                        let line2 = self.get(idx + 1);
-                        if line2.contains("Magnitude") && line2.contains(':') {
-                            line2.split(':').nth(1).and_then(|s| parse_f64(s.trim())).unwrap_or_else(|| (x*x+y*y+z*z).sqrt())
-                        } else {
-                            (x * x + y * y + z * z).sqrt()
+                    // Look up to 7 lines ahead for Magnitude (Debye) or Magnitude (a.u.)
+                    let mut mag_debye: Option<f64> = None;
+                    let mut mag_au: Option<f64> = None;
+                    for k in (idx + 1)..self.len().min(idx + 8) {
+                        let lk = self.get(k);
+                        if lk.contains("Magnitude") && lk.contains(':') {
+                            if let Some(val) = lk.split(':').nth(1).and_then(|s| parse_f64(s.trim())) {
+                                if lk.contains("Debye") {
+                                    mag_debye = Some(val);
+                                } else {
+                                    mag_au = Some(val);
+                                }
+                            }
                         }
-                    } else {
-                        (x * x + y * y + z * z).sqrt()
-                    };
+                    }
+                    let mag = mag_debye
+                        .or(mag_au)
+                        .unwrap_or_else(|| (x * x + y * y + z * z).sqrt());
                     data.dipole = Some(Dipole { x, y, z, magnitude: mag });
                 }
             }

@@ -33,10 +33,12 @@ class CubeWriter:
             from rdkit import Chem
 
             pt = Chem.GetPeriodicTable()
-            to_z = lambda s: pt.GetAtomicNumber(s) if isinstance(s, str) else int(s)
-        except:
+            def to_z(s):
+                return pt.GetAtomicNumber(s) if isinstance(s, str) else int(s)
+        except Exception:
             # Fallback simple map if RDKit fails (unlikely)
-            to_z = lambda s: 0 if isinstance(s, str) else int(s)
+            def to_z(s):
+                return 0 if isinstance(s, str) else int(s)
 
         with open(filepath, "w") as f:
             f.write(f"ORCA Analyzer Cube File: {comment}\n")
@@ -515,7 +517,7 @@ class CalcWorker(QThread):
                         mo_display_id = "_".join(parts)
                 else:
                     mo_display_id = str(int(self.mo_idx) + 1)
-            except:
+            except Exception:
                 pass  # Fallback to original string
 
             CubeWriter.write(

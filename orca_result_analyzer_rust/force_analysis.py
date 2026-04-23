@@ -475,7 +475,7 @@ class ForceViewerDialog(QDialog):
                 conf.SetAtomPosition(
                     i, Point3D(coords[i][0], coords[i][1], coords[i][2])
                 )
-        except:
+        except Exception:
             return
 
         mol.AddConformer(conf)
