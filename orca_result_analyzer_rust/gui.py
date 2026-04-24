@@ -13,7 +13,35 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, QObject, QEvent
+
+class _ClickFilter(QObject):
+    """Qt event filter: detects non-drag left clicks on the 3D plotter widget."""
+    def __init__(self, callback, press_callback=None, parent=None):
+        super().__init__(parent)
+        self._callback = callback
+        self._press_callback = press_callback
+        self._press_pos = None
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._press_pos = event.position().toPoint()
+                if self._press_callback:
+                    self._press_callback(self._press_pos.x(), self._press_pos.y(), obj)
+        elif t == QEvent.Type.MouseButtonRelease:
+            if (
+                event.button() == Qt.MouseButton.LeftButton
+                and self._press_pos is not None
+            ):
+                rel = event.position().toPoint()
+                dx = rel.x() - self._press_pos.x()
+                dy = rel.y() - self._press_pos.y()
+                self._press_pos = None
+                if dx * dx + dy * dy <= 25:  # <=5 px -> click
+                    self._callback(rel.x(), rel.y(), obj)
+        return False  # never consume -- camera interaction must keep working
 
 class ElidedLabel(QLabel):
     def __init__(self, text="", parent=None):
@@ -69,11 +97,15 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.file_path = file_path
         self.context = context
 
-        self.setWindowTitle(f"ORCA Result Analyzer — Rust Edition (v{PLUGIN_VERSION})")
+        self.setWindowTitle(f"ORCA Result Analyzer (v{PLUGIN_VERSION})")
         self.resize(450, 600)
 
         # self.logger = Logger.get_logger("OrcaResultAnalyzerDialog")
         self.init_ui()
+
+        # Install global picking logic
+        self._click_filter = None
+        self._enable_plotter_picking()
 
         # Update main window title to reflect ORCA result
         if hasattr(self.mw, "init_manager"):
@@ -359,6 +391,103 @@ class OrcaResultAnalyzerDialog(QDialog):
 
         self.update_button_states()
 
+    def _enable_plotter_picking(self):
+        """Install Qt event filter on the 3D plotter widget for atom click detection."""
+        try:
+            if not hasattr(self, "mw"): return
+            v3d = getattr(self.mw, "view_3d_manager", None)
+            if not v3d: return
+            plotter = getattr(v3d, "plotter", None)
+            if not plotter: return
+            self._click_filter = _ClickFilter(
+                self._on_plotter_click,
+                press_callback=self._on_plotter_press,
+                parent=self,
+            )
+            plotter.installEventFilter(self._click_filter)
+        except Exception as e:
+            logging.error("GUI _enable_plotter_picking failed: %s", e)
+
+    def _disable_plotter_picking(self):
+        """Remove the event filter from the 3D plotter widget."""
+        try:
+            if not hasattr(self, "mw"): return
+            v3d = getattr(self.mw, "view_3d_manager", None)
+            plotter = getattr(v3d, "plotter", None) if v3d else None
+            if plotter and self._click_filter:
+                plotter.removeEventFilter(self._click_filter)
+        except Exception as _e:
+            logging.warning("silenced: %s", _e)
+        self._click_filter = None
+
+    def _pick_atom_at(self, x, y, widget):
+        """Run VTK pick at (x, y) and return the closest atom index, or None."""
+        try:
+            import vtk
+            import numpy as np
+            if not hasattr(self, "mw"): return None
+            v3d = getattr(self.mw, "view_3d_manager", None)
+            if not v3d: return None
+            plotter = getattr(v3d, "plotter", None)
+            if not plotter: return None
+            atom_actor = getattr(v3d, "atom_actor", None)
+            if atom_actor is None: return None
+            atom_positions = getattr(v3d, "atom_positions_3d", None)
+            if atom_positions is None or len(atom_positions) == 0: return None
+            vtk_y = widget.height() - y
+            picker = vtk.vtkCellPicker()
+            picker.SetTolerance(0.005)
+            picker.Pick(x, vtk_y, 0, plotter.renderer)
+            if picker.GetActor() is not atom_actor: return None
+            pick_pos = picker.GetPickPosition()
+            diffs = atom_positions - np.array(pick_pos)
+            return int(np.argmin((diffs ** 2).sum(axis=1)))
+        except Exception as e:
+            logging.error("GUI _pick_atom_at error: %s", e)
+            return None
+
+    def _on_plotter_press(self, x, y, widget):
+        self._pending_click_atom = None
+        try:
+            best_idx = self._pick_atom_at(x, y, widget)
+            if best_idx is None: return
+            self._pending_click_atom = best_idx
+        except Exception as e:
+            logging.error("GUI press handler error: %s", e)
+
+    def _on_plotter_click(self, x, y, widget):
+        try:
+            from PyQt6.QtWidgets import QApplication
+            best_idx = getattr(self, "_pending_click_atom", None)
+            self._pending_click_atom = None
+            if not hasattr(self, "mw"): return
+            e3d = getattr(self.mw, "edit_3d_manager", None)
+            if not e3d: return
+
+            if best_idx is None:
+                # Clicked empty space -> clear selection
+                e3d.selected_atoms_3d.clear()
+                if hasattr(e3d, "update_selection_visuals"):
+                    e3d.update_selection_visuals()
+                return
+
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                if best_idx in e3d.selected_atoms_3d:
+                    e3d.selected_atoms_3d.remove(best_idx)
+                else:
+                    e3d.selected_atoms_3d.add(best_idx)
+            else:
+                if best_idx in e3d.selected_atoms_3d and len(e3d.selected_atoms_3d) == 1:
+                    e3d.selected_atoms_3d.clear()
+                else:
+                    e3d.selected_atoms_3d = {best_idx}
+                    
+            if hasattr(e3d, "update_selection_visuals"):
+                e3d.update_selection_visuals()
+        except Exception as e:
+            logging.error("GUI click handler error: %s", e)
+
     def close_all_sub_dialogs(self):
         """Close all tracked analysis dialogs to prevent orphaned windows."""
         dialog_attrs = [
@@ -385,6 +514,7 @@ class OrcaResultAnalyzerDialog(QDialog):
 
     def closeEvent(self, event):
         """Ensure all sub-dialogs close when the main analyzer window is closed."""
+        self._disable_plotter_picking()
         self.close_all_sub_dialogs()
         super().closeEvent(event)
 

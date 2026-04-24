@@ -54,32 +54,6 @@ from .nmr_custom_ref_dialog import CustomReferenceDialog
 from . import PLUGIN_VERSION
 
 
-class _ClickFilter(QObject):
-    """Qt event filter: detects non-drag left clicks on the 3D plotter widget."""
-
-    def __init__(self, callback, parent=None):
-        super().__init__(parent)
-        self._callback = callback
-        self._press_pos = None
-
-    def eventFilter(self, obj, event):
-        t = event.type()
-        if t == QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._press_pos = event.position().toPoint()
-        elif t == QEvent.Type.MouseButtonRelease:
-            if (
-                event.button() == Qt.MouseButton.LeftButton
-                and self._press_pos is not None
-            ):
-                rel = event.position().toPoint()
-                dx = rel.x() - self._press_pos.x()
-                dy = rel.y() - self._press_pos.y()
-                if dx * dx + dy * dy <= 25:  # ≤5 px → click, not drag
-                    self._callback(rel.x(), rel.y(), obj)
-                self._press_pos = None
-        return False  # never consume — camera interaction still works
-
 
 class NMRDialog(QDialog):
     """Enhanced NMR Chemical Shielding Dialog with Spectrum"""
@@ -343,101 +317,7 @@ class NMRDialog(QDialog):
         self._nmr_sphere_actors = []
         self._nmr_label_names = []  # Explicitly track label names for removal
 
-        # Qt event filter for direct atom click detection (no measurement mode required)
-        self._click_filter = None
-        self._enable_plotter_picking()
 
-    def _enable_plotter_picking(self):
-        """Install Qt event filter on the 3D plotter widget for atom click detection."""
-        try:
-            mw = self.parent_dlg.mw if hasattr(self.parent_dlg, "mw") else None
-            if not mw:
-                logging.warning(
-                    "NMR: parent_dlg has no 'mw' attribute — plotter picking disabled"
-                )
-                return
-            v3d = getattr(mw, "view_3d_manager", None)
-            if not v3d:
-                logging.warning(
-                    "NMR: mw has no 'view_3d_manager' — plotter picking disabled"
-                )
-                return
-            plotter = getattr(v3d, "plotter", None)
-            if not plotter:
-                logging.warning(
-                    "NMR: view_3d_manager has no 'plotter' — plotter picking disabled"
-                )
-                return
-            self._click_filter = _ClickFilter(self._on_plotter_click, parent=self)
-            plotter.installEventFilter(self._click_filter)
-        except Exception as e:
-            logging.error("NMR: _enable_plotter_picking failed: %s", e)
-
-    def _disable_plotter_picking(self):
-        """Remove the event filter from the 3D plotter widget."""
-        try:
-            mw = self.parent_dlg.mw if hasattr(self.parent_dlg, "mw") else None
-            if mw:
-                v3d = getattr(mw, "view_3d_manager", None)
-                plotter = getattr(v3d, "plotter", None) if v3d else None
-                if plotter and self._click_filter:
-                    plotter.removeEventFilter(self._click_filter)
-        except Exception as _e:
-            logging.warning("[nmr_analysis.py:237] silenced: %s", _e)
-        self._click_filter = None
-
-    def _on_plotter_click(self, x, y, widget):
-        """Called when a non-drag left click is detected on the 3D plotter widget."""
-        try:
-            import vtk
-
-            mw = self.parent_dlg.mw if hasattr(self.parent_dlg, "mw") else None
-            if not mw:
-                logging.warning("NMR click: parent_dlg has no 'mw'")
-                return
-            v3d = getattr(mw, "view_3d_manager", None)
-            if not v3d:
-                logging.warning("NMR click: mw has no 'view_3d_manager'")
-                return
-            plotter = getattr(v3d, "plotter", None)
-            if not plotter:
-                logging.warning("NMR click: view_3d_manager has no 'plotter'")
-                return
-
-            atom_actor = getattr(v3d, "atom_actor", None)
-            if atom_actor is None:
-                logging.warning("NMR click: view_3d_manager has no 'atom_actor'")
-                return
-
-            atom_positions = getattr(v3d, "atom_positions_3d", None)
-            if atom_positions is None:
-                logging.warning("NMR click: view_3d_manager has no 'atom_positions_3d'")
-                return
-
-            # Convert Qt (top-left origin) → VTK (bottom-left origin)
-            vtk_y = widget.height() - y
-
-            picker = vtk.vtkCellPicker()
-            picker.SetTolerance(0.005)
-            picker.Pick(x, vtk_y, 0, plotter.renderer)
-            picked_actor = picker.GetActor()
-
-            if picked_actor is None or picked_actor is not atom_actor:
-                return
-
-            # Find closest atom to pick position
-            pick_pos = picker.GetPickPosition()
-            if len(atom_positions) == 0:
-                return
-
-            diffs = atom_positions - np.array(pick_pos)
-            dists = (diffs**2).sum(axis=1)
-            best_idx = int(np.argmin(dists))
-
-            # Select NMR peaks matching this atom
-            self.select_peaks_by_atom_indices([best_idx])
-        except Exception as e:
-            logging.error("NMR click handler error: %s", e)
 
     def _check_external_selection(self):
         """Poll main window for 3D selection changes"""
@@ -2690,7 +2570,6 @@ class NMRDialog(QDialog):
     def closeEvent(self, event):
         """Clean up labels when dialog closes"""
         self.save_settings()
-        self._disable_plotter_picking()
         self.clear_atom_labels()
         super().closeEvent(event)
 

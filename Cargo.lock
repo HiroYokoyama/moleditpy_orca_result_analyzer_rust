@@ -98,7 +98,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "orca-mo-rs"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "pyo3",
  "rayon",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "orca-parser-rs"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "once_cell",
  "pyo3",
