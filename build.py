@@ -1,8 +1,8 @@
 """
 build.py — Build both Rust extensions for the ORCA Result Analyzer.
 
-  crates/orca_parser_rs/  →  orca_parser_rs.*.pyd   (ORCA output parser)
-  crates/orca_mo_rs/      →  orca_mo_rs.*.pyd        (GTO/MO grid evaluation)
+  crates/orca_parser_rs/  ->  orca_parser_rs.*.pyd   (ORCA output parser)
+  crates/orca_mo_rs/      ->  orca_mo_rs.*.pyd        (GTO/MO grid evaluation)
 
 Usage:
     python build.py            # development build + copy in-place + create plugin zip
@@ -69,7 +69,7 @@ def extract_pyd(wheel, pattern):
             dest = os.path.join(PKG_DIR, os.path.basename(name))
             with zf.open(name) as src, open(dest, "wb") as dst:
                 shutil.copyfileobj(src, dst)
-            print(f"Copied  {os.path.basename(name)}  →  orca_result_analyzer_rust/")
+            print(f"Copied  {os.path.basename(name)}  ->  orca_result_analyzer_rust/")
 
 
 def newest_wheel(pattern):
@@ -148,7 +148,7 @@ def main():
                 full    = os.path.join(root, fname)
                 arcname = os.path.join(pkg_name, os.path.relpath(full, PKG_DIR))
                 zf.write(full, arcname)
-    print(f"Plugin zip:  {zip_name}  →  build/")
+    print(f"Plugin zip:  {zip_name}  ->  build/")
 
     print("\nDone.")
 
