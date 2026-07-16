@@ -1,0 +1,70 @@
+name: Build & Release Plugin Packages
+
+# Builds the Rust-accelerated plugin for every supported environment
+# (OS x Python version) and attaches the per-environment plugin zips to a
+# GitHub Release. Each zip is `orca_result_analyzer_rust-<version>-<tag>.zip`
+# (e.g. ...-3.9.2-cp313-cp313-win_amd64.zip) produced by build.py, and contains
+# the orca_result_analyzer_rust/ folder with the compiled .pyd/.so inside.
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-13 = x86_64, macos-latest = arm64
+        os: [windows-latest, ubuntu-latest, macos-13, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build plugin package (release)
+        run: python build.py --release
+
+      - name: Upload package zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: build/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List collected packages
+        run: ls -R dist
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

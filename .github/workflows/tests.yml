@@ -1,0 +1,39 @@
+name: Tests
+
+# Builds the Rust extensions in-place (build.py) and runs the headless test
+# suite. PyQt6/pytest-qt are intentionally NOT installed: the tests stub Qt at
+# module level, and a real binding would defeat those stubs. numpy/matplotlib
+# are real (parser math / spectrum widgets).
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build + test deps
+        run: python -m pip install --upgrade pip maturin pytest numpy matplotlib
+
+      - name: Build Rust extensions in-place
+        run: python build.py
+
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
