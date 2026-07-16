@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QTreeWidgetItemIterator,
     QComboBox,
+    QSlider,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
@@ -28,7 +29,6 @@ import math
 import numpy as np
 import os
 import json
-import traceback
 import pyvista as pv
 from .spectrum_widget import SpectrumWidget
 from .utils import get_default_export_path
@@ -45,6 +45,15 @@ try:
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
+
+
+class ResetSlider(QSlider):
+    """QSlider that resets to 0 when double-clicked."""
+
+    def mouseDoubleClickEvent(self, event):
+        self.setValue(0)
+        if hasattr(super(), "mouseDoubleClickEvent"):
+            super().mouseDoubleClickEvent(event)
 
 
 class FreqSpectrumWindow(QWidget):
@@ -75,7 +84,7 @@ class FreqSpectrumWindow(QWidget):
         settings_file = self.freq_dialog.settings_file
         if os.path.exists(settings_file):
             try:
-                with open(settings_file, "r") as f:
+                with open(settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
                 settings = all_settings.get("freq_settings", {})
                 if "spec_sigma" in settings:
@@ -89,7 +98,7 @@ class FreqSpectrumWindow(QWidget):
                 if "spec_auto_y" in settings:
                     self.chk_auto_y.setChecked(bool(settings["spec_auto_y"]))
             except Exception as _e:
-                logging.warning("[freq_analysis.py:63] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -399,12 +408,12 @@ class FreqSpectrumWindow(QWidget):
         if path:
             success = self.spectrum.save_csv(path)
             if success:
-                if self.freq_dialog and self.freq_dialog.mw:
-                    self.freq_dialog.mw.statusBar().showMessage(
+                if self.freq_dialog and self.freq_dialog.context:
+                    self.freq_dialog.context.show_status_message(
                         f"Data saved to: {os.path.basename(path)}", 5000
                     )
                 else:
-                    print(f"Data saved to: {path}")
+                    logging.info("Data saved to: %s", path)
             else:
                 QMessageBox.warning(self, "Error", "Failed to save CSV.")
 
@@ -420,12 +429,12 @@ class FreqSpectrumWindow(QWidget):
         if path:
             success = self.spectrum.save_sticks_csv(path)
             if success:
-                if self.freq_dialog and self.freq_dialog.mw:
-                    self.freq_dialog.mw.statusBar().showMessage(
+                if self.freq_dialog and self.freq_dialog.context:
+                    self.freq_dialog.context.show_status_message(
                         f"Stick data saved to: {os.path.basename(path)}", 5000
                     )
                 else:
-                    print(f"Stick data saved to: {path}")
+                    logging.info("Stick data saved to: %s", path)
             else:
                 QMessageBox.warning(self, "Error", "Failed to export stick data.")
 
@@ -442,9 +451,10 @@ class FreqSpectrumWindow(QWidget):
 
 
 class FrequencyDialog(QDialog):
-    def __init__(self, parent, frequencies, atoms, coords):
+    def __init__(self, parent, frequencies, atoms, coords, context=None):
         super().__init__(parent)
         self.mw = parent
+        self.context = context
         self.frequencies = frequencies  # List of dicts
         self.atoms = atoms
         self.base_coords = coords
@@ -522,7 +532,7 @@ class FrequencyDialog(QDialog):
         # List
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(
-            ["Mode", "Freq (cm⁻¹)", "IR (km/mol)", "Raman (Å⁴/amu)"]
+            ["Mode", "Freq (cm⁻¹)", "Unscaled (cm⁻¹)", "IR (km/mol)", "Raman (Å⁴/amu)"]
         )
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.currentItemChanged.connect(self.on_mode_selected)
@@ -583,7 +593,8 @@ class FrequencyDialog(QDialog):
         self.spin_amp = QDoubleSpinBox()
         self.spin_amp.setRange(0.1, 10.0)
         self.spin_amp.setSingleStep(0.1)
-        self.spin_amp.setValue(0.5)
+        self.spin_amp.setValue(1.0)
+        self.spin_amp.valueChanged.connect(self.on_amp_changed)
         anim_row1.addWidget(self.spin_amp)
 
         anim_row1.addWidget(QLabel(" | FPS:"))
@@ -593,6 +604,28 @@ class FrequencyDialog(QDialog):
         self.spin_fps.valueChanged.connect(self.update_fps)
         anim_row1.addWidget(self.spin_fps)
         anim_layout.addLayout(anim_row1)
+
+        # Manual Displacement Row
+        manual_row = QHBoxLayout()
+        self.chk_manual_displ = QCheckBox("Manual Displacement")
+        self.chk_manual_displ.setChecked(False)
+        self.chk_manual_displ.toggled.connect(self.toggle_manual_displacement)
+        manual_row.addWidget(self.chk_manual_displ)
+
+        self.slider_displ = ResetSlider(Qt.Orientation.Horizontal)
+        self.slider_displ.setRange(-100, 100)
+        self.slider_displ.setValue(0)
+        self.slider_displ.setEnabled(False)
+        self.slider_displ.valueChanged.connect(self.on_displacement_slider_changed)
+        manual_row.addWidget(self.slider_displ)
+
+        self.lbl_displ_val = QLabel("+0.00")
+        self.lbl_displ_val.setFixedWidth(50)
+        self.lbl_displ_val.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        manual_row.addWidget(self.lbl_displ_val)
+        anim_layout.addLayout(manual_row)
 
         # Playback row
         action_row = QHBoxLayout()
@@ -659,20 +692,28 @@ class FrequencyDialog(QDialog):
                 if is_trivial_5:
                     start_idx = 5
 
+        _imaginary_color = QColor("#cc0000")  # red for imaginary modes
+
         for i, f in enumerate(self.frequencies):
             if i < start_idx:
                 continue
 
-            freq_val = f["freq"] * a + b
-            # Always show both IR and Raman in columns
+            raw_freq = f["freq"]  # unscaled — used to decide imaginary
+            freq_val = raw_freq * a + b  # scaled — shown in the column
+            # Columns: Mode | Scaled | Unscaled | IR | Raman
             item = QTreeWidgetItem(
                 [
                     str(i),
                     f"{freq_val:.2f}",
+                    f"{raw_freq:.2f}",
                     f"{f.get('ir', 0.0):.2f}",
                     f"{f.get('raman', 0.0):.2f}",
                 ]
             )
+            # Colour imaginary modes red based on the unscaled frequency
+            if raw_freq < 0:
+                for col in range(5):
+                    item.setForeground(col, _imaginary_color)
             self.tree.addTopLevelItem(item)
 
     def update_preset_combo(self):
@@ -744,15 +785,21 @@ class FrequencyDialog(QDialog):
             self.update_data()
 
     def update_data(self):
-        # Update list values (scaling)
+        # Update list values (scaling); col 2 (Unscaled) is static — never touched here
         a = self.spin_sf_a.value()
         b = self.spin_sf_b.value()
+        _imaginary_color = QColor("#cc0000")
+        _default_color = QColor()  # invalid = palette default
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
             item = root.child(i)
             idx = int(item.text(0))
-            old_f = self.frequencies[idx]["freq"]
-            item.setText(1, f"{old_f * a + b:.2f}")
+            raw_freq = self.frequencies[idx]["freq"]  # unscaled
+            item.setText(1, f"{raw_freq * a + b:.2f}")
+            # Re-apply (or remove) imaginary colouring using unscaled value
+            color = _imaginary_color if raw_freq < 0 else _default_color
+            for col in range(5):
+                item.setForeground(col, color)
 
         # Update spectrum window if it's open
         if self.spectrum_win is not None:
@@ -800,7 +847,7 @@ class FrequencyDialog(QDialog):
                     )
                     break
             except Exception as _e:
-                logging.warning("[freq_analysis.py:718] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             it += 1
 
     def on_mode_selected(self, current, previous):
@@ -841,11 +888,15 @@ class FrequencyDialog(QDialog):
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
             except Exception as _e:
-                logging.warning("[freq_analysis.py:756] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             self.vector_actor = None
 
         # 2. Reset geometry
         self.reset_geometry()
+
+        if self.chk_manual_displ.isChecked():
+            self.apply_manual_displacement()
+            return
 
         if not self.chk_vector.isChecked():
             return
@@ -875,7 +926,76 @@ class FrequencyDialog(QDialog):
 
             self.mw.plotter.render()
         except Exception as e:
-            print(f"Error in FrequencyDialog.update_view: {e}")
+            logging.warning("Error in FrequencyDialog.update_view: %s", e)
+
+    def toggle_manual_displacement(self, checked):
+        self.slider_displ.setEnabled(checked)
+        # Disable/enable play buttons
+        self.btn_play.setEnabled(not checked)
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+        self.btn_gif.setEnabled(HAS_PIL and not checked)
+
+        if checked:
+            if self.is_playing:
+                self.stop_animation()
+            self.apply_manual_displacement()
+        else:
+            self.slider_displ.setValue(0)
+            self.reset_geometry()
+            if self.chk_vector.isChecked():
+                self.update_view()  # Restore vectors
+
+    def on_displacement_slider_changed(self):
+        self.apply_manual_displacement()
+
+    def on_amp_changed(self):
+        if self.chk_manual_displ.isChecked():
+            self.apply_manual_displacement()
+
+    def apply_manual_displacement(self):
+        if self.current_mode_idx < 0:
+            return
+
+        amp = self.spin_amp.value()
+        val = self.slider_displ.value() / 100.0
+        factor = val * amp
+
+        self.lbl_displ_val.setText(f"{factor:+.2f}")
+
+        vecs = self.frequencies[self.current_mode_idx].get("vector", [])
+        if not vecs:
+            return
+
+        try:
+            mol = self.mw.current_mol
+            conf = mol.GetConformer()
+            for i, (bx, by, bz) in enumerate(self.base_coords):
+                vx, vy, vz = vecs[i]
+                nx = bx + vx * factor
+                ny = by + vy * factor
+                nz = bz + vz * factor
+                conf.SetAtomPosition(i, Point3D(nx, ny, nz))
+
+            if self.context:
+                self.context.draw_molecule_3d(mol)
+            else:
+                self.mw.view_3d_manager.draw_molecule_3d(mol)
+
+            # Update vectors if enabled
+            if self.chk_vector.isChecked():
+                self.update_vectors_at_displaced_position()
+            else:
+                # Remove vectors if disabled
+                if self.vector_actor:
+                    try:
+                        self.mw.plotter.remove_actor(self.vector_actor)
+                    except Exception as _e:
+                        logging.warning("silenced: %s", _e)
+                    self.vector_actor = None
+
+        except Exception as e:
+            logging.warning("Error in apply_manual_displacement: %s", e)
 
     def start_animation(self):
         if self.current_mode_idx < 0:
@@ -938,15 +1058,17 @@ class FrequencyDialog(QDialog):
                 nz = bz + vz * factor
                 conf.SetAtomPosition(i, Point3D(nx, ny, nz))
 
-            self.mw.view_3d_manager.draw_molecule_3d(mol)
+            if self.context:
+                self.context.draw_molecule_3d(mol)
+            else:
+                self.mw.view_3d_manager.draw_molecule_3d(mol)
 
             # Update vectors if enabled
             if self.chk_vector.isChecked():
                 self.update_vectors_at_displaced_position()
 
         except Exception as e:
-            print(f"Error in animate_frame: {e}")
-            traceback.print_exc()
+            logging.warning("Error in animate_frame: %s", e)
 
     def update_vectors_at_displaced_position(self):
         """Redraw vectors at current displaced atomic positions"""
@@ -954,7 +1076,7 @@ class FrequencyDialog(QDialog):
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
             except Exception as _e:
-                logging.warning("[freq_analysis.py:857] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             self.vector_actor = None
 
         vecs = self.frequencies[self.current_mode_idx].get("vector", [])
@@ -996,7 +1118,7 @@ class FrequencyDialog(QDialog):
                     arrows, color=self.vector_color, name="vib_vectors"
                 )
         except Exception as e:
-            print(f"Error updating vectors: {e}")
+            logging.warning("Error updating vectors: %s", e)
 
     def reset_geometry(self):
         try:
@@ -1004,12 +1126,12 @@ class FrequencyDialog(QDialog):
             conf = mol.GetConformer()
             for i, (bx, by, bz) in enumerate(self.base_coords):
                 conf.SetAtomPosition(i, Point3D(bx, by, bz))
-            self.mw.view_3d_manager.draw_molecule_3d(mol)
+            if self.context:
+                self.context.draw_molecule_3d(mol)
+            else:
+                self.mw.view_3d_manager.draw_molecule_3d(mol)
         except Exception as e:
-            print(f"Error in reset_geometry: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logging.warning("Error in reset_geometry: %s", e)
 
     def save_gif(self):
         if not HAS_PIL:
@@ -1111,9 +1233,9 @@ class FrequencyDialog(QDialog):
                     nz = bz + vz * factor
                     conf.SetAtomPosition(j, Point3D(nx, ny, nz))
 
-                if hasattr(mw, "view_3d_manager") and hasattr(
-                    mw.view_3d_manager, "draw_molecule_3d"
-                ):
+                if self.context:
+                    self.context.draw_molecule_3d(mol)
+                elif hasattr(mw, "view_3d_manager"):
                     mw.view_3d_manager.draw_molecule_3d(mol)
                 QApplication.processEvents()
                 mw.plotter.render()
@@ -1163,12 +1285,12 @@ class FrequencyDialog(QDialog):
                     loop=0,
                     disposal=2,
                 )
-                if self.mw and hasattr(self.mw, "statusBar"):
-                    self.mw.statusBar().showMessage(
+                if self.context:
+                    self.context.show_status_message(
                         f"GIF saved to: {os.path.basename(path)}", 5000
                     )
                 else:
-                    print(f"GIF saved to: {path}")
+                    logging.info("GIF saved to: %s", path)
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save GIF:\n{e}")
@@ -1194,12 +1316,18 @@ class FrequencyDialog(QDialog):
         self.update_view()
 
     def closeEvent(self, event):
-        self.stop_animation()
+        if self.chk_manual_displ.isChecked():
+            self.is_playing = False
+            self.timer.stop()
+            self.animation_step = 0
+        else:
+            self.stop_animation()
+
         if self.vector_actor:
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
             except Exception as _e:
-                logging.warning("[freq_analysis.py:1051] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         if self.spectrum_win:
             self.spectrum_win.close()
 
@@ -1212,7 +1340,7 @@ class FrequencyDialog(QDialog):
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
 
                 settings = all_settings.get("freq_settings", {})
@@ -1249,16 +1377,16 @@ class FrequencyDialog(QDialog):
                     self.spin_fps.setValue(int(settings["fps"]))
 
             except Exception as e:
-                print(f"Error loading freq settings: {e}")
+                logging.warning("Error loading freq settings: %s", e)
 
     def save_settings(self):
         all_settings = {}
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[freq_analysis.py:1101] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         freq_settings = {
             "sf_a": self.spin_sf_a.value(),
@@ -1295,7 +1423,7 @@ class FrequencyDialog(QDialog):
         all_settings["freq_settings"] = freq_settings
 
         try:
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving freq settings: {e}")
+            logging.warning("Error saving freq settings: %s", e)

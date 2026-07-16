@@ -1,3 +1,4 @@
+import csv
 import os
 import tempfile
 import numpy as np
@@ -303,8 +304,6 @@ class MODialog(QDialog):
         keys = []
         if isinstance(self.mos, dict):
             raw_keys = list(self.mos.keys())
-            # Check key type
-            # print(f"DEBUG Keys: {raw_keys[:10]}") # Debugging
             if raw_keys and isinstance(raw_keys[0], str) and "_" in raw_keys[0]:
                 # Sort by spin, then index -> NOW Sort by Index, then Spin (interleaved)
                 def sort_key(k):
@@ -386,7 +385,7 @@ class MODialog(QDialog):
             try:
                 local_idx = int(mo_idx_val)
             except Exception as _e:
-                logging.warning("[mo_analysis.py:348] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
             if spin in spin_homo_idx:
                 h = spin_homo_idx[spin]
@@ -434,7 +433,7 @@ class MODialog(QDialog):
                 if path and os.path.exists(path):
                     bg_color = QColor(240, 255, 240)  # Light Green
             except Exception as _e:
-                logging.warning("[mo_analysis.py:388] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
             item = QTreeWidgetItem(
                 [label_id, homo_lumo_label, f"{occ:.2f}", f"{e_ev:.3f}", f"{e_eh:.5f}"]
@@ -497,7 +496,7 @@ class MODialog(QDialog):
             if path and os.path.exists(path):
                 self.show_cube(path)
         except Exception as _e:
-            logging.warning("[mo_analysis.py:445] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
 
     def on_selection_changed(self):
         items = self.tree.selectedItems()
@@ -518,7 +517,7 @@ class MODialog(QDialog):
                             if key in self.parent_dlg.parser.data["mo_coeffs"]:
                                 has_coeffs = True
             except Exception as _e:
-                logging.warning("[mo_analysis.py:462] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         self.btn_vis.setEnabled(has_coeffs)
         if items and not has_coeffs:
@@ -544,9 +543,9 @@ class MODialog(QDialog):
             if sb:
                 sb.showMessage("ORCA Input block copied to clipboard.", 5000)
             else:
-                print("ORCA Input block copied to clipboard.")
+                logging.info("ORCA Input block copied to clipboard.")
         else:
-            print("ORCA Input block copied to clipboard.")
+            logging.info("ORCA Input block copied to clipboard.")
 
     def get_engine(self):
         if not BasisSetEngine:
@@ -638,7 +637,7 @@ class MODialog(QDialog):
                 break
 
         if not mo_data:
-            print(f"MO not found for key: {key}")
+            logging.warning("MO not found for key: %s", key)
             self.process_generation_queue()  # Skip invalid key
             return
 
@@ -722,7 +721,7 @@ class MODialog(QDialog):
                 try:
                     os.makedirs(out_dir)
                 except Exception as _e:
-                    logging.warning("[mo_analysis.py:644] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
         self.last_cube_path = out_path
 
@@ -794,7 +793,7 @@ class MODialog(QDialog):
             else:
                 # If one fails, maybe continue?
                 # Or stop? let's continue but warn?
-                print(f"Failed: {res}")
+                logging.warning("Failed: %s", res)
                 QMessageBox.warning(
                     self, "Generation Failed", f"Failed to generate cube:\n{res}"
                 )
@@ -824,7 +823,7 @@ class MODialog(QDialog):
                 c_str = style.split("background-color:")[1].split(";")[0].strip()
                 current_col = QColor(c_str)
         except Exception as _e:
-            logging.warning("[mo_analysis.py:719] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
 
         col = QColorDialog.getColor(current_col, self, "Select Color")
         if col.isValid():
@@ -858,7 +857,7 @@ class MODialog(QDialog):
 
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
                     mo_settings = all_settings.get("mo_settings", {})
 
@@ -884,17 +883,17 @@ class MODialog(QDialog):
 
                     self.combo_presets.blockSignals(False)
             except Exception as e:
-                print(f"Error loading settings: {e}")
+                logging.warning("Error loading settings: %s", e)
 
     def save_settings(self):
         # Save current presets and selection
         all_settings = {}
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[mo_analysis.py:779] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         mo_settings = {
             "presets": {k: v for k, v in self.presets.items() if k != "Default"},
@@ -904,10 +903,10 @@ class MODialog(QDialog):
         all_settings["mo_settings"] = mo_settings
 
         try:
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            logging.warning("Error saving settings: %s", e)
 
     def save_preset(self):
         name, ok = QInputDialog.getText(self, "Save Preset", "Preset Name:")
@@ -959,22 +958,40 @@ class MODialog(QDialog):
             return
         data = self.presets[name]
 
-        # Block signals to avoid partial updates? No, updates are fine.
-        self.spin_iso.setValue(data.get("iso", 0.02))
-        self.spin_opacity.setValue(data.get("opacity", 0.5))
+        # Block signals on all vis controls so intermediate changes do NOT each
+        # trigger a separate show_cube() call (which would alter other MOs).
+        for w in (
+            self.spin_iso,
+            self.spin_opacity,
+            self.combo_style,
+            self.check_smooth,
+        ):
+            w.blockSignals(True)
+        try:
+            self.spin_iso.setValue(data.get("iso", 0.02))
+            self.spin_opacity.setValue(data.get("opacity", 0.5))
 
-        style = data.get("style", "Surface")
-        idx = self.combo_style.findText(style)
-        if idx >= 0:
-            self.combo_style.setCurrentIndex(idx)
+            style = data.get("style", "Surface")
+            idx = self.combo_style.findText(style)
+            if idx >= 0:
+                self.combo_style.setCurrentIndex(idx)
 
-        cp = data.get("color_p", "#ff0000")
-        cn = data.get("color_n", "#0000ff")
-        self.set_btn_color(self.btn_color_p, cp)
-        self.set_btn_color(self.btn_color_n, cn)
+            cp = data.get("color_p", "#ff0000")
+            cn = data.get("color_n", "#0000ff")
+            self.set_btn_color(self.btn_color_p, cp)
+            self.set_btn_color(self.btn_color_n, cn)
 
-        self.check_smooth.setChecked(data.get("smooth_shading", True))
+            self.check_smooth.setChecked(data.get("smooth_shading", True))
+        finally:
+            for w in (
+                self.spin_iso,
+                self.spin_opacity,
+                self.combo_style,
+                self.check_smooth,
+            ):
+                w.blockSignals(False)
 
+        # One single redraw after all values are set
         self.update_vis_only()
         self.save_settings()  # Save last used
 
@@ -1000,7 +1017,7 @@ class MODialog(QDialog):
 
     def show_cube(self, path):
         if not CubeVisualizer:
-            print("Warning: CubeVisualizer module not loaded.")
+            logging.warning("Warning: CubeVisualizer module not loaded.")
             QMessageBox.warning(
                 self,
                 "Visualizer Error",
@@ -1028,6 +1045,7 @@ class MODialog(QDialog):
                 smooth_shading=self.check_smooth.isChecked(),
             )
             mw.plotter.render()
+            self.last_cube_path = path
 
     def closeEvent(self, event):
         """Clean up 3D actors when closing"""
@@ -1036,7 +1054,7 @@ class MODialog(QDialog):
             try:
                 self.energy_dlg.close()
             except Exception as _e:
-                logging.warning("[mo_analysis.py:905] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             self.energy_dlg = None
 
         if hasattr(self.parent_dlg, "mw"):
@@ -1063,9 +1081,7 @@ class MODialog(QDialog):
             return
 
         try:
-            import csv
-
-            with open(filename, "w", newline="") as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["ID", "Occupation", "Energy (eV)", "Energy (Eh)"])
 
@@ -1082,16 +1098,15 @@ class MODialog(QDialog):
                     row = [item.text(0), item.text(1), item.text(2), item.text(3)]
                     writer.writerow(row)
                     it += 1
-            # print(f"Data exported to {filename}")
             # QMessageBox.information(self, "Success", f"Data exported to {filename}")
             if self.mw and hasattr(self.mw, "statusBar"):
                 sb = self.mw.statusBar()
                 if sb:
                     sb.showMessage(f"Data exported to {filename}", 5000)
                 else:
-                    print(f"Data exported to {filename}")
+                    logging.info("Data exported to %s", filename)
             else:
-                print(f"Data exported to {filename}")
+                logging.info("Data exported to %s", filename)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
 

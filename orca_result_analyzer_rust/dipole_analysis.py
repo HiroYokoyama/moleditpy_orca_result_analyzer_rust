@@ -111,7 +111,7 @@ class DipoleDialog(QDialog):
             try:
                 self.parent_dlg.mw.plotter.remove_actor(self.arrow_actor)
             except Exception as _e:
-                logging.warning("[dipole_analysis.py:99] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             self.arrow_actor = None
 
         if not self.chk_show.isChecked():
@@ -154,7 +154,7 @@ class DipoleDialog(QDialog):
             mw.plotter.render()
 
         except Exception as e:
-            print(f"Error drawing dipole: {e}")
+            logging.warning("Error drawing dipole: %s", e)
 
     def pick_color(self):
         color = QColorDialog.getColor(
@@ -175,7 +175,7 @@ class DipoleDialog(QDialog):
                 self.parent_dlg.mw.plotter.remove_actor(self.arrow_actor)
                 self.parent_dlg.mw.plotter.render()
             except Exception as _e:
-                logging.warning("[dipole_analysis.py:152] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         # Clean up reference in parent
         # Clean up reference in parent
         if hasattr(self.parent_dlg, "dipole_dlg"):
@@ -187,7 +187,7 @@ class DipoleDialog(QDialog):
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
 
                 settings = all_settings.get("dipole_settings", {})
@@ -211,16 +211,17 @@ class DipoleDialog(QDialog):
                     self.chk_reverse.setChecked(bool(settings["reverse"]))
 
             except Exception as e:
-                print(f"Error loading dipole settings: {e}")
+                logging.warning("Error loading dipole settings: %s", e)
 
     def save_settings(self):
         all_settings = {}
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception:
-                pass  # settings file may be empty or corrupt; start fresh
+                # settings file may be empty or corrupt; start fresh
+                logging.debug("Could not read settings file; starting fresh", exc_info=True)
 
         dipole_settings = {
             # "scale": self.spin_scale.value(),
@@ -233,7 +234,7 @@ class DipoleDialog(QDialog):
         all_settings["dipole_settings"] = dipole_settings
 
         try:
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving dipole settings: {e}")
+            logging.warning("Error saving dipole settings: %s", e)

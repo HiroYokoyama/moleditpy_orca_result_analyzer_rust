@@ -1,3 +1,4 @@
+import csv
 import os
 import json
 import numpy as np
@@ -31,9 +32,9 @@ import logging
 
 # GradientBar Widget
 class GradientBar(QWidget):
-    def __init__(self, parent=None, colors=["red", "white", "blue"]):
+    def __init__(self, parent=None, colors=None):
         super().__init__(parent)
-        self.colors = colors
+        self.colors = colors if colors is not None else ["red", "white", "blue"]
         self.setFixedHeight(30)
 
     def set_colors(self, colors):
@@ -85,7 +86,7 @@ class ChargeDialog(QDialog):
 
         if os.path.exists(settings_file):
             try:
-                with open(settings_file, "r") as f:
+                with open(settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
 
                 # Load from "charge_settings" key
@@ -103,7 +104,7 @@ class ChargeDialog(QDialog):
                 if "last_charge_scheme" in settings_data:
                     self.current_scheme = settings_data["last_charge_scheme"]
             except Exception as e:
-                print(f"Error loading settings: {e}")
+                logging.warning("Error loading settings: %s", e)
 
         main_layout = QVBoxLayout(self)
 
@@ -274,10 +275,10 @@ class ChargeDialog(QDialog):
         all_settings = {}
         if os.path.exists(settings_file):
             try:
-                with open(settings_file, "r") as f:
+                with open(settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[charge_analysis.py:248] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         # Prepare charge-specific data
         charge_data = {}
@@ -297,10 +298,10 @@ class ChargeDialog(QDialog):
         all_settings["charge_settings"] = charge_data
 
         try:
-            with open(settings_file, "w") as f:
+            with open(settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            logging.warning("Error saving settings: %s", e)
 
     def toggle_labels(self):
         """Toggle charge value labels in 3D view"""
@@ -312,7 +313,7 @@ class ChargeDialog(QDialog):
                 try:
                     self.parent_dlg.mw.plotter.remove_actor(actor)
                 except Exception as _e:
-                    logging.warning("[charge_analysis.py:286] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
             self._charge_labels = []
 
         if not show:
@@ -358,12 +359,19 @@ class ChargeDialog(QDialog):
         """Reset atom colors to default CPK colors"""
         try:
             mw = self.parent_dlg.mw
-            if hasattr(mw, "view_3d_manager"):
+            v3d = getattr(mw, "view_3d_manager", None)
+            if v3d is not None:
                 data = self.all_charges.get(self.current_type, [])
-                for item in data:
-                    mw.view_3d_manager.update_atom_color_override(
-                        item["atom_idx"], None
-                    )
+                overrides = getattr(v3d, "_plugin_color_overrides", None)
+                if overrides is not None:
+                    # Clear entries directly instead of calling
+                    # update_atom_color_override() per atom -- that helper
+                    # redraws the whole molecule on every single call.
+                    for item in data:
+                        overrides.pop(item["atom_idx"], None)
+                else:
+                    for item in data:
+                        v3d.update_atom_color_override(item["atom_idx"], None)
 
             # Remove scalar bar if exists
             if getattr(self, "_charge_scalar_bar", None) is not None:
@@ -371,7 +379,7 @@ class ChargeDialog(QDialog):
                     self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
                     delattr(self, "_charge_scalar_bar")
                 except Exception as _e:
-                    logging.warning("[charge_analysis.py:342] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
             # Remove labels if exist
             if getattr(self, "_charge_labels", None) is not None:
@@ -379,30 +387,21 @@ class ChargeDialog(QDialog):
                     try:
                         self.parent_dlg.mw.plotter.remove_actor(actor)
                     except Exception as _e:
-                        logging.warning("[charge_analysis.py:349] silenced: %s", _e)
+                        logging.warning("silenced: %s", _e)
                 self._charge_labels = []
                 self.chk_show_labels.setChecked(False)
 
             # Redraw molecule with default CPK colors
-            if (
-                hasattr(self.parent_dlg.mw, "current_mol")
-                and self.parent_dlg.mw.current_mol
-            ):
-                if hasattr(self.parent_dlg.mw, "view_3d_manager"):
-                    self.parent_dlg.mw.view_3d_manager.draw_molecule_3d(
-                        self.parent_dlg.mw.current_mol
-                    )
+            if self.parent_dlg.mw.current_mol:
+                self.parent_dlg.context.draw_molecule_3d(self.parent_dlg.mw.current_mol)
 
             # Render
             if hasattr(self.parent_dlg.mw, "plotter"):
                 self.parent_dlg.mw.plotter.render()
 
-            if self.parent_dlg.mw and hasattr(self.parent_dlg.mw, "statusBar"):
-                self.parent_dlg.mw.statusBar().showMessage(
-                    "Colors reset to CPK default.", 5000
-                )
-            else:
-                print("Colors reset to CPK default.")
+            self.parent_dlg.context.show_status_message(
+                "Colors reset to CPK default.", 5000
+            )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to reset colors:\n{e}")
 
@@ -538,22 +537,25 @@ class ChargeDialog(QDialog):
 
         try:
             mw = self.parent_dlg.mw
-            if hasattr(mw, "view_3d_manager"):
-                for item in data:
-                    idx = item["atom_idx"]
-                    q = item["charge"]
-                    color = get_color(q)
-                    mw.view_3d_manager.update_atom_color_override(idx, color)
+            v3d = getattr(mw, "view_3d_manager", None)
+            if v3d is not None:
+                overrides = getattr(v3d, "_plugin_color_overrides", None)
+                if overrides is not None:
+                    # Write overrides directly instead of calling
+                    # update_atom_color_override() per atom -- that helper
+                    # triggers a full molecule redraw on every call, which is
+                    # O(n_atoms) redraws for a single "Apply Coloring" click.
+                    for item in data:
+                        overrides[item["atom_idx"]] = get_color(item["charge"])
+                else:
+                    for item in data:
+                        v3d.update_atom_color_override(
+                            item["atom_idx"], get_color(item["charge"])
+                        )
 
             # Redraw molecule once after all colors are set
-            if (
-                hasattr(self.parent_dlg.mw, "current_mol")
-                and self.parent_dlg.mw.current_mol
-            ):
-                if hasattr(self.parent_dlg.mw, "view_3d_manager"):
-                    self.parent_dlg.mw.view_3d_manager.draw_molecule_3d(
-                        self.parent_dlg.mw.current_mol
-                    )
+            if self.parent_dlg.mw.current_mol:
+                self.parent_dlg.context.draw_molecule_3d(self.parent_dlg.mw.current_mol)
 
             # Add charge labels if checkbox is enabled
             if self.chk_show_labels.isChecked():
@@ -568,9 +570,7 @@ class ChargeDialog(QDialog):
                             try:
                                 self.parent_dlg.mw.plotter.remove_actor(actor)
                             except Exception as _e:
-                                logging.warning(
-                                    "[charge_analysis.py:513] silenced: %s", _e
-                                )
+                                logging.warning("silenced: %s", _e)
 
                     self._charge_labels = []
                     for i, item in enumerate(data):
@@ -603,7 +603,7 @@ class ChargeDialog(QDialog):
                     try:
                         self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
                     except Exception as _e:
-                        logging.warning("[charge_analysis.py:543] silenced: %s", _e)
+                        logging.warning("silenced: %s", _e)
 
                 # Create dummy mesh for scalar bar
                 dummy = pv.Box()
@@ -631,18 +631,15 @@ class ChargeDialog(QDialog):
                     },
                 )
             except Exception as e:
-                print(f"Error adding scalar bar: {e}")
+                logging.warning("Error adding scalar bar: %s", e)
 
             # Trigger update
             if hasattr(self.parent_dlg.mw, "plotter"):
                 self.parent_dlg.mw.plotter.render()
 
-            if self.parent_dlg.mw and hasattr(self.parent_dlg.mw, "statusBar"):
-                self.parent_dlg.mw.statusBar().showMessage(
-                    f"Applied '{self.current_scheme}' coloring to 3D view.", 5000
-                )
-            else:
-                print(f"Applied '{self.current_scheme}' coloring.")
+            self.parent_dlg.context.show_status_message(
+                f"Applied '{self.current_scheme}' coloring to 3D view.", 5000
+            )
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to color atoms:\n{e}")
@@ -662,8 +659,6 @@ class ChargeDialog(QDialog):
             return
 
         try:
-            import csv
-
             data = self.all_charges.get(self.current_type, [])
             if not data:
                 return
@@ -715,7 +710,7 @@ class ChargeDialog(QDialog):
             }
             display_headers = [header_map.get(k, k.capitalize()) for k in headers]
 
-            with open(filename, "w", newline="") as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(display_headers)
 
@@ -724,17 +719,10 @@ class ChargeDialog(QDialog):
                     for k in headers:
                         row.append(item.get(k, ""))
                     writer.writerow(row)
-
-            # print(f"Data exported to {filename}")
             # QMessageBox.information(self, "Success", f"Data exported to {filename}")
-            if hasattr(self.parent_dlg, "mw") and self.parent_dlg.mw:
-                self.parent_dlg.mw.statusBar().showMessage(
-                    f"Data exported to {filename}", 5000
-                )
-            elif hasattr(self.parent_dlg, "context"):
-                self.parent_dlg.context.get_main_window().statusBar().showMessage(
-                    f"Data exported to {filename}", 5000
-                )
+            self.parent_dlg.context.show_status_message(
+                f"Data exported to {filename}", 5000
+            )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
         finally:
@@ -747,7 +735,7 @@ class ChargeDialog(QDialog):
             try:
                 self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
             except Exception as _e:
-                logging.warning("[charge_analysis.py:656] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         # Remove labels
         if getattr(self, "_charge_labels", None) is not None:
@@ -755,7 +743,7 @@ class ChargeDialog(QDialog):
                 try:
                     self.parent_dlg.mw.plotter.remove_actor(actor)
                 except Exception as _e:
-                    logging.warning("[charge_analysis.py:663] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
         if hasattr(self.parent_dlg.mw, "plotter"):
             self.parent_dlg.mw.plotter.render()

@@ -20,11 +20,13 @@ import logging
 
 
 class SCFTraceDialog(QDialog):
-    def __init__(self, parent, scf_traces):
+    def __init__(self, parent, scf_traces, dispersion=None, spin_s2=None):
         super().__init__(parent)
         self.setWindowTitle("SCF Energy Trace")
         self.resize(700, 500)
         self.scf_traces = scf_traces
+        self.dispersion = dispersion
+        self.spin_s2 = spin_s2
 
         layout = QVBoxLayout(self)
 
@@ -61,6 +63,34 @@ class SCFTraceDialog(QDialog):
 
         layout.addWidget(ctrl_group)
 
+        # Dispersion correction (DFT-D3/D4), if present
+        if self.dispersion is not None:
+            lbl_disp = QLabel(f"Dispersion correction: {self.dispersion:.6f} Eh")
+            lbl_disp.setStyleSheet("color:#444; font-size:9pt; padding:2px;")
+            lbl_disp.setToolTip(
+                "London dispersion correction (DFT-D3/D4), included in the final energy."
+            )
+            layout.addWidget(lbl_disp)
+
+        # Spin contamination summary (open-shell / UHF only) — lives here
+        # alongside SCF convergence rather than Atomic Charges, since <S**2>
+        # is a wavefunction-quality diagnostic, not a per-atom property.
+        if self.spin_s2 and self.spin_s2.get("actual") is not None:
+            actual = self.spin_s2["actual"]
+            ideal = self.spin_s2.get("ideal")
+            cont = self.spin_s2.get("contamination")
+            parts = [f"⟨S²⟩ = {actual:.4f}"]
+            if ideal is not None:
+                parts.append(f"ideal {ideal:.4f}")
+            if cont is not None:
+                parts.append(f"contamination {cont:+.4f}")
+            lbl_s2 = QLabel("   •   ".join(parts))
+            lbl_s2.setStyleSheet("color:#444; font-size:9pt; padding:2px;")
+            lbl_s2.setToolTip(
+                "UHF/UKS spin expectation value <S**2> vs the ideal S(S+1)."
+            )
+            layout.addWidget(lbl_s2)
+
         # Plotting Area
         self.figure = Figure(figsize=(5, 4), dpi=100)
         self.canvas = FigureCanvas(self.figure)
@@ -83,7 +113,7 @@ class SCFTraceDialog(QDialog):
         try:
             plt.close(self.figure)
         except Exception as _e:
-            logging.warning("[scf_analysis.py:71] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
         super().closeEvent(event)
 
     def update_plot(self):
@@ -193,7 +223,7 @@ class SCFTraceDialog(QDialog):
         try:
             if idx == -1:
                 # Export all
-                with open(path, "w", newline="") as f:
+                with open(path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(
                         [
@@ -211,15 +241,14 @@ class SCFTraceDialog(QDialog):
                             cum_idx += 1
             else:
                 trace = self.scf_traces[idx]
-                with open(path, "w", newline="") as f:
+                with open(path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(["Iteration", "Energy (Eh)"])
                     for d in trace.get("iterations", []):
                         writer.writerow([d["iter"], d["energy"]])
-            # print(f"Data exported to {path}")
-            if hasattr(self.parent(), "mw") and self.parent().mw:
-                self.parent().mw.statusBar().showMessage(
+            if self.parent() and self.parent().context:
+                self.parent().context.show_status_message(
                     f"Data exported to {path}", 5000
                 )
         except Exception as e:
-            print(f"Error exporting CSV: {e}")
+            logging.warning("Error exporting CSV: %s", e)

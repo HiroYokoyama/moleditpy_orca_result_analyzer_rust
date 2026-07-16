@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pyvista as pv
 
@@ -20,11 +21,11 @@ class CubeVisualizer:
             self.current_grid = self._build_grid(meta)
             return True
         except Exception as e:
-            print(f"Error loading cube: {e}")
+            logging.warning("Error loading cube: %s", e)
             return False
 
     def _parse_cube(self, filename):
-        with open(filename, "r") as f:
+        with open(filename, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
         # Skip comments
@@ -136,7 +137,7 @@ class CubeVisualizer:
 
             self.plotter.render()
         except Exception as e:
-            print(f"Iso error: {e}")
+            logging.warning("Iso error: %s", e)
 
     def clear(self):
         self.plotter.remove_actor("mo_iso_p")

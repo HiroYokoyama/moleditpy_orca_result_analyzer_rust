@@ -64,7 +64,7 @@ class ThermalTableDialog(QDialog):
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
 
                 settings = all_settings.get("thermal_settings", {})
@@ -72,26 +72,26 @@ class ThermalTableDialog(QDialog):
                     self.chk_details.setChecked(bool(settings["show_details"]))
 
             except Exception as e:
-                print(f"Error loading thermal settings: {e}")
+                logging.warning("Error loading thermal settings: %s", e)
 
     def save_settings(self):
         all_settings = {}
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[thermal_analysis.py:70] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         thermal_settings = {"show_details": self.chk_details.isChecked()}
 
         all_settings["thermal_settings"] = thermal_settings
 
         try:
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving thermal settings: {e}")
+            logging.warning("Error saving thermal settings: %s", e)
 
     def update_table(self):
         show_details = self.chk_details.isChecked()
@@ -190,17 +190,16 @@ class ThermalTableDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV Files (*.csv)")
         if path:
             try:
-                with open(path, "w", newline="") as f:
+                with open(path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(["Property", "Value"])
                     for r in range(self.table.rowCount()):
                         p = self.table.item(r, 0).text()
                         v = self.table.item(r, 1).text()
                         writer.writerow([p, v])
-                # print(f"Data exported to {path}")
-                if hasattr(self.parent(), "mw") and self.parent().mw:
-                    self.parent().mw.statusBar().showMessage(
+                if self.parent() and self.parent().context:
+                    self.parent().context.show_status_message(
                         f"Data exported to {path}", 5000
                     )
             except Exception:
-                pass  # Simple error handling
+                logging.debug("Thermochemistry export failed", exc_info=True)

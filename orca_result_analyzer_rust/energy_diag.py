@@ -1,4 +1,7 @@
+import glob
 import os
+import math
+import logging
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -12,13 +15,47 @@ from PyQt6.QtWidgets import (
     QApplication,
     QToolTip,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QAction
 
 try:
     import nist
 except ImportError:
     nist = None
+
+
+def calculate_arrow_shifts(items, val_to_y, threshold=15, distance=20):
+    shifts = {}
+    if not items:
+        return shifts
+
+    # Group consecutive overlapping items into clusters
+    clusters = []
+    current_cluster = [0]
+    for idx in range(1, len(items)):
+        y_prev = val_to_y(items[idx - 1][1])
+        y_curr = val_to_y(items[idx][1])
+        if (y_curr - y_prev) < threshold:
+            current_cluster.append(idx)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [idx]
+    clusters.append(current_cluster)
+
+    # Calculate shifts for each cluster
+    for cluster in clusters:
+        n = len(cluster)
+        if n == 1:
+            i_orig = items[cluster[0]][0]
+            shifts[i_orig] = 0
+        else:
+            start_shift = (distance / 2) * (n - 1)
+            for i, idx in enumerate(cluster):
+                i_orig = items[idx][0]
+                shift_val = start_shift - i * distance
+                shifts[i_orig] = int(shift_val)
+
+    return shifts
 
 
 class EnergyDiagramDialog(QDialog):
@@ -278,7 +315,6 @@ class EnergyDiagramDialog(QDialog):
             # QMessageBox.information(self, "Info", "No result directory linked.")
             return
 
-        import glob
         # Pattern matching
         # Files like: "15_HOMO.cube" or "16_LUMO.cube" or "15_MO_15.cube"
 
@@ -313,13 +349,43 @@ class EnergyDiagramDialog(QDialog):
             patterns.append(f"{target_idx:03d}_*.cube")  # Legacy
             patterns.append(f"{index:03d}_*.cube")  # Legacy 0-based
 
-        for p in patterns:
-            full_p = os.path.join(self.result_dir, p)
-            files = glob.glob(full_p)
+        # Check for dedicated _cubes subfolder
+        search_dirs = [self.result_dir]
+
+        # 1. Try to find the exact _cubes subfolder from parser filename
+        parent_dlg = self.parent()
+        if parent_dlg and hasattr(parent_dlg, "parent_dlg") and parent_dlg.parent_dlg:
+            main_dlg = parent_dlg.parent_dlg
+            if hasattr(main_dlg, "parser") and main_dlg.parser:
+                if hasattr(main_dlg.parser, "filename") and main_dlg.parser.filename:
+                    res_dir = os.path.dirname(main_dlg.parser.filename)
+                    base = os.path.splitext(os.path.basename(main_dlg.parser.filename))[
+                        0
+                    ]
+                    cube_dir = os.path.join(res_dir, f"{base}_cubes")
+                    if os.path.exists(cube_dir) and cube_dir not in search_dirs:
+                        search_dirs.append(cube_dir)
+
+        # 2. Also search for any subdirectories ending with '_cubes' in self.result_dir
+        if os.path.isdir(self.result_dir):
+            try:
+                for item in os.listdir(self.result_dir):
+                    item_path = os.path.join(self.result_dir, item)
+                    if os.path.isdir(item_path) and item.endswith("_cubes"):
+                        if item_path not in search_dirs:
+                            search_dirs.append(item_path)
+            except Exception as e:
+                logging.warning("Error listing result_dir in try_load_cube: %s", e)
+
+        files = []
+        for s_dir in search_dirs:
+            for p in patterns:
+                full_p = os.path.join(s_dir, p)
+                files = glob.glob(full_p)
+                if files:
+                    break
             if files:
                 break
-
-        # Fallback to unpadded (legacy support) - handled in loop above
 
         if files:
             target = files[0]  # Take first match
@@ -472,8 +538,6 @@ class EnergyDiagramDialog(QDialog):
 
         # Reset Hit Zones
         self.hit_zones = []  # List of (QRect, index, label)
-        from PyQt6.QtCore import QRect
-
         w = self.width()
         h = self.height()
 
@@ -523,8 +587,6 @@ class EnergyDiagramDialog(QDialog):
             range_disp = 1.0
 
         # 2. Calculate Nice Step in Display Units
-        import math
-
         target_ticks = 10
         raw_step = range_disp / target_ticks
 
@@ -666,9 +728,11 @@ class EnergyDiagramDialog(QDialog):
                         occupied_items.append(item)
                     else:
                         virtual_items.append(item)
-
             occupied_items.sort(key=lambda x: x[1], reverse=True)
             virtual_items.sort(key=lambda x: x[1], reverse=False)
+
+            distance = 10 if self.is_uhf else 20
+            shifts = calculate_arrow_shifts(occupied_items, val_to_y, distance=distance)
 
             # Colors and Labels
             is_alpha_col = title == "Alpha"
@@ -725,7 +789,10 @@ class EnergyDiagramDialog(QDialog):
                             elif is_beta_col:
                                 arrow_txt = "↓"
 
-                        rect_icon = QRect(int(x1), int(y) - 14, int(level_w), 28)
+                        shift_x = shifts.get(i_orig, 0)
+                        rect_icon = QRect(
+                            int(x1) + shift_x, int(y) - 14, int(level_w), 28
+                        )
                         painter.drawText(
                             rect_icon, Qt.AlignmentFlag.AlignCenter, arrow_txt
                         )

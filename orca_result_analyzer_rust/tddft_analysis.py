@@ -11,7 +11,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QGroupBox,
     QComboBox,
+    QScrollArea,
+    QFrame,
+    QSizePolicy,
+    QWidget,
+    QSplitter,
 )
+from PyQt6.QtCore import Qt
 import os
 import json
 
@@ -23,6 +29,7 @@ except ImportError:
     except Exception:
         SpectrumWidget = None
 from .utils import get_default_export_path
+import datetime
 import logging
 
 
@@ -30,17 +37,30 @@ class TDDFTDialog(QDialog):
     def __init__(self, parent, excitations):
         super().__init__(parent)
         self.setWindowTitle("TDDFT Spectrum")
-        self.resize(700, 700)
+        self.resize(1100, 720)
         self.excitations = excitations
         self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
         self.prev_sigma_unit_idx = 0  # 0: cm-1, 1: eV
+        self._current_item = None  # Currently selected excitation
 
-        main_layout = QVBoxLayout(self)
+        # ── Top-level layout: horizontal splitter (spectrum | info panel) ──
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(6, 6, 6, 6)
+        root_layout.setSpacing(0)
 
-        # 0. Spectrum Display (Existing Widget)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        root_layout.addWidget(self._splitter)
+
+        # ── LEFT SIDE: spectrum + controls ──
+        left_widget = QWidget()
+        left_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        main_layout = QVBoxLayout(left_widget)
+        main_layout.setContentsMargins(0, 0, 4, 0)
+
+        # 0. Spectrum Display
         if SpectrumWidget:
-            # Data format for widget: List of dicts.
-            # Our excitations have 'energy_nm' and 'osc'.
             self.spectrum = SpectrumWidget(
                 self.excitations,
                 x_key="energy_nm",
@@ -84,7 +104,6 @@ class TDDFTDialog(QDialog):
         # Row 2: Sigma & Sticks
         row2_layout = QHBoxLayout()
         row2_layout.addWidget(QLabel("Broadening (FWHM):"))
-        # Default Broadening
         self.spin_sigma = QDoubleSpinBox()
         self.spin_sigma.setRange(0.1, 10000.0)
         self.spin_sigma.setValue(3000.0)
@@ -94,7 +113,7 @@ class TDDFTDialog(QDialog):
 
         self.combo_sigma_unit = QComboBox()
         self.combo_sigma_unit.addItems(["cm⁻¹", "eV"])
-        self.combo_sigma_unit.setCurrentIndex(0)  # Default to cm-1
+        self.combo_sigma_unit.setCurrentIndex(0)
         self.combo_sigma_unit.currentIndexChanged.connect(self.on_sigma_unit_changed)
         row2_layout.addWidget(self.combo_sigma_unit)
 
@@ -218,8 +237,258 @@ class TDDFTDialog(QDialog):
         action_layout.addWidget(self.btn_close)
 
         main_layout.addLayout(action_layout)
+
+        # ── RIGHT SIDE: transition info panel ──
+        right_widget = self._build_info_panel()
+
+        self._splitter.addWidget(left_widget)
+        self._splitter.addWidget(right_widget)
+        # Left gets ~70%, right ~30%
+        self._splitter.setSizes([770, 330])
+        self._splitter.setCollapsible(0, False)
+        self._splitter.setCollapsible(1, False)
+
         self.load_settings()
         self.switch_spectrum_type()
+
+    # ── Info-panel construction ─────────────────────────────────────────────
+
+    def _build_info_panel(self):
+        """Build the right-side panel that shows selected transition details."""
+        panel = QFrame()
+        panel.setFrameShape(QFrame.Shape.StyledPanel)
+        panel.setMinimumWidth(260)
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+        vbox = QVBoxLayout(panel)
+        vbox.setContentsMargins(8, 8, 8, 8)
+        vbox.setSpacing(6)
+
+        # ── Header ──
+        hdr = QLabel("Transition Details")
+        hdr.setStyleSheet(
+            "font-size: 11pt; font-weight: bold; color: #0066cc;"
+            " border-bottom: 2px solid #0066cc; padding-bottom: 4px;"
+        )
+        vbox.addWidget(hdr)
+
+        # ── Placeholder when nothing selected ──
+        self._info_placeholder = QLabel(
+            "Click on a stick or spectrum\npeak to see details here."
+        )
+        self._info_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info_placeholder.setStyleSheet(
+            "color: #999; font-size: 9.5pt; font-style: italic;"
+        )
+        self._info_placeholder.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
+        vbox.addWidget(self._info_placeholder)
+
+        # ── State header label (hidden until selection) ──
+        self._lbl_state = QLabel()
+        self._lbl_state.setStyleSheet(
+            "font-size: 10.5pt; font-weight: bold; color: #003380;"
+        )
+        self._lbl_state.setWordWrap(True)
+        self._lbl_state.hide()
+        vbox.addWidget(self._lbl_state)
+
+        # ── Separator ──
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.hide()
+        self._sep1 = sep
+        vbox.addWidget(sep)
+
+        # ── Energy / strength grid ──
+        self._energy_widget = QWidget()
+        self._energy_layout = QVBoxLayout(self._energy_widget)
+        self._energy_layout.setContentsMargins(0, 0, 0, 0)
+        self._energy_layout.setSpacing(2)
+        self._energy_widget.hide()
+        vbox.addWidget(self._energy_widget)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        sep2.hide()
+        self._sep2 = sep2
+        vbox.addWidget(sep2)
+
+        # ── Orbital contributions (scrollable) ──
+        contrib_hdr = QLabel("Orbital Contributions")
+        contrib_hdr.setStyleSheet("font-weight: bold; font-size: 9.5pt; color: #444;")
+        contrib_hdr.hide()
+        self._contrib_hdr = contrib_hdr
+        vbox.addWidget(contrib_hdr)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.hide()
+        self._scroll = scroll
+
+        self._contrib_label = QLabel()
+        self._contrib_label.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self._contrib_label.setWordWrap(False)
+        self._contrib_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._contrib_label.setStyleSheet(
+            "font-family: monospace; font-size: 9pt; color: #222;"
+            " background: #f9f9f9; padding: 4px;"
+        )
+        scroll.setWidget(self._contrib_label)
+        vbox.addWidget(scroll, 1)  # stretch=1 so it fills remaining space
+
+        return panel
+
+    def _clear_info_panel(self):
+        """Reset the right panel to placeholder state."""
+        self._info_placeholder.show()
+        self._lbl_state.hide()
+        self._sep1.hide()
+        self._energy_widget.hide()
+        self._sep2.hide()
+        self._contrib_hdr.hide()
+        self._scroll.hide()
+
+    def _populate_info_panel(self, item):
+        """Fill the right panel with data from the selected excitation *item*."""
+        if item is None:
+            self._clear_info_panel()
+            return
+
+        state = item.get("state", "?")
+        energy_ev = item.get("energy_ev", 0.0) or 0.0
+        energy_nm = item.get("energy_nm", 0.0) or 0.0
+        energy_cm = item.get("energy_cm", 0.0) or 0.0
+        if energy_cm <= 0 and energy_nm > 0:
+            energy_cm = 1e7 / energy_nm
+
+        is_cd = self.radio_cd.isChecked()
+        gauge_mode = self.combo_gauge.currentIndex()  # 0: Length, 1: Velocity
+
+        # ── State header ──
+        self._info_placeholder.hide()
+        self._lbl_state.setText(f"Excited State {state}")
+        self._lbl_state.show()
+        self._sep1.show()
+
+        # ── Energy rows ──
+        # Clear old rows
+        while self._energy_layout.count():
+            item_w = self._energy_layout.takeAt(0)
+            if item_w.widget():
+                item_w.widget().deleteLater()
+
+        def _row(label_text, value_text, highlight=False):
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("color: #555; font-size: 9pt;")
+            val = QLabel(value_text)
+            style = "font-size: 9pt; font-weight: bold;"
+            if highlight:
+                style += " color: #0055bb;"
+            val.setStyleSheet(style)
+            val.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(lbl)
+            row.addStretch()
+            row.addWidget(val)
+            container = QWidget()
+            container.setLayout(row)
+            return container
+
+        self._energy_layout.addWidget(_row("Energy (eV):", f"{energy_ev:.4f} eV", True))
+        self._energy_layout.addWidget(_row("Wavelength:", f"{energy_nm:.2f} nm", True))
+        if energy_cm > 0:
+            self._energy_layout.addWidget(_row("Wavenumber:", f"{energy_cm:.1f} cm⁻¹"))
+
+        # Oscillator / Rotatory strengths
+        osc_len = item.get("osc_len", item.get("osc", None))
+        osc_vel = item.get("osc_vel", None)
+        rot_len = item.get("rot_len", item.get("rotatory_strength", None))
+        rot_vel = item.get("rot_vel", None)
+
+        def _fmt(v):
+            return f"{v:.6f}" if v is not None else "N/A"
+
+        if not is_cd:
+            sep_lbl = QLabel("Oscillator Strength  f")
+            sep_lbl.setStyleSheet(
+                "font-size: 9pt; font-weight: bold; color: #555;"
+                " margin-top: 6px; border-top: 1px solid #ddd; padding-top: 4px;"
+            )
+            self._energy_layout.addWidget(sep_lbl)
+            self._energy_layout.addWidget(
+                _row(
+                    "  Length (L):",
+                    _fmt(osc_len) + (" ★" if gauge_mode == 0 else ""),
+                    gauge_mode == 0,
+                )
+            )
+            self._energy_layout.addWidget(
+                _row(
+                    "  Velocity (V):",
+                    _fmt(osc_vel) + (" ★" if gauge_mode == 1 else ""),
+                    gauge_mode == 1,
+                )
+            )
+        else:
+            sep_lbl = QLabel("Rotatory Strength  R  [10⁻⁴⁰ cgs]")
+            sep_lbl.setStyleSheet(
+                "font-size: 9pt; font-weight: bold; color: #555;"
+                " margin-top: 6px; border-top: 1px solid #ddd; padding-top: 4px;"
+            )
+            self._energy_layout.addWidget(sep_lbl)
+            self._energy_layout.addWidget(
+                _row(
+                    "  Length (L):",
+                    _fmt(rot_len) + (" ★" if gauge_mode == 0 else ""),
+                    gauge_mode == 0,
+                )
+            )
+            self._energy_layout.addWidget(
+                _row(
+                    "  Velocity (V):",
+                    _fmt(rot_vel) + (" ★" if gauge_mode == 1 else ""),
+                    gauge_mode == 1,
+                )
+            )
+            # Show both osc and rot when in CD mode if available
+            if osc_len is not None or osc_vel is not None:
+                f_lbl = QLabel("Oscillator Strength  f")
+                f_lbl.setStyleSheet(
+                    "font-size: 9pt; font-weight: bold; color: #555;"
+                    " margin-top: 4px; border-top: 1px solid #ddd; padding-top: 4px;"
+                )
+                self._energy_layout.addWidget(f_lbl)
+                self._energy_layout.addWidget(_row("  Length (L):", _fmt(osc_len)))
+                self._energy_layout.addWidget(_row("  Velocity (V):", _fmt(osc_vel)))
+
+        self._energy_widget.show()
+        self._sep2.show()
+
+        # ── Orbital contributions ──
+        transitions = item.get("transitions", [])
+        if transitions and len(transitions) > 0:
+            self._contrib_hdr.show()
+            self._contrib_label.setText("\n".join(str(t) for t in transitions))
+            self._scroll.show()
+        else:
+            self._contrib_hdr.hide()
+            self._contrib_label.setText("")
+            self._scroll.hide()
+
+    # ── Existing methods (unchanged logic, dialog removed) ──────────────────
 
     def closeEvent(self, event):
         self.save_settings()
@@ -228,12 +497,11 @@ class TDDFTDialog(QDialog):
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
 
                 settings = all_settings.get("tddft_settings", {})
 
-                # Block signals during loading to prevent unintended conversion logic
                 self.spin_sigma.blockSignals(True)
                 self.combo_sigma_unit.blockSignals(True)
 
@@ -244,7 +512,6 @@ class TDDFTDialog(QDialog):
                     idx = int(settings["sigma_unit_idx"])
                     self.combo_sigma_unit.setCurrentIndex(idx)
                     self.prev_sigma_unit_idx = idx
-                    # Set initial step size
                     self.spin_sigma.setSingleStep(0.1 if idx == 1 else 10.0)
 
                 if "show_sticks" in settings:
@@ -259,23 +526,20 @@ class TDDFTDialog(QDialog):
             except Exception as e:
                 self.spin_sigma.blockSignals(False)
                 self.combo_sigma_unit.blockSignals(False)
-                print(f"Error loading TDDFT settings: {e}")
+                logging.warning("[tddft_analysis.py] Error loading settings: %s", e)
 
     def update_spectrum_sigma(self):
         if not self.spectrum:
             return
-        val = self.spin_sigma.value()  # This is FWHM
-        unit_idx = self.combo_sigma_unit.currentIndex()  # 0: cm-1, 1: eV
+        val = self.spin_sigma.value()
+        unit_idx = self.combo_sigma_unit.currentIndex()
 
-        # Convert val to cm-1 if eV
-        # 1 eV = 8065.544 cm-1
         fwhm_cm = val
         if unit_idx == 1:  # eV
             fwhm_cm = val * 8065.544
 
-        # Convert FWHM to Sigma (FWHM = 2 * sqrt(2 * ln 2) * sigma approx 2.355 * sigma)
         self.spectrum.sigma = fwhm_cm / 2.355
-        self.spectrum.broaden_in_energy = True  # Both cm-1 and eV are Energy
+        self.spectrum.broaden_in_energy = True
         self.spectrum.update()
 
     def on_sigma_unit_changed(self):
@@ -284,17 +548,15 @@ class TDDFTDialog(QDialog):
             return
 
         val = self.spin_sigma.value()
-        # 1 eV = 8065.544 cm-1
-        if self.prev_sigma_unit_idx == 0 and curr_idx == 1:  # cm-1 to eV
+        if self.prev_sigma_unit_idx == 0 and curr_idx == 1:
             new_val = val / 8065.544
-        elif self.prev_sigma_unit_idx == 1 and curr_idx == 0:  # eV to cm-1
+        elif self.prev_sigma_unit_idx == 1 and curr_idx == 0:
             new_val = val * 8065.544
         else:
             new_val = val
 
         self.spin_sigma.blockSignals(True)
         self.spin_sigma.setValue(new_val)
-        # Update step size: 0.1 for eV, 10.0 for cm-1
         self.spin_sigma.setSingleStep(0.1 if curr_idx == 1 else 10.0)
         self.spin_sigma.blockSignals(False)
 
@@ -306,10 +568,10 @@ class TDDFTDialog(QDialog):
         all_settings = {}
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[tddft_analysis.py:291] silenced: %s", _e)
+                logging.warning("[tddft_analysis.py:save_settings] silenced: %s", _e)
 
         tddft_settings = {
             "sigma": self.spin_sigma.value(),
@@ -321,16 +583,14 @@ class TDDFTDialog(QDialog):
         all_settings["tddft_settings"] = tddft_settings
 
         try:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
 
-            # log to status bar if possible
-            if hasattr(self.parent(), "mw") and self.parent().mw:
-                self.parent().mw.statusBar().showMessage("TDDFT settings saved.", 3000)
+            if self.parent() and self.parent().context:
+                self.parent().context.show_status_message("TDDFT settings saved.", 3000)
         except Exception as e:
-            print(f"Error saving TDDFT settings: {e}")
+            logging.warning("[tddft_analysis.py:save_settings] Error: %s", e)
 
     def toggle_auto_y(self):
         is_auto = self.chk_auto_y.isChecked()
@@ -388,10 +648,8 @@ class TDDFTDialog(QDialog):
         if path:
             success = self.spectrum.save_csv(path)
             if success:
-                # print(f"Data saved to {path}")
-                # QMessageBox.information(self, "Saved", f"Data saved to:\n{path}")
-                if hasattr(self.parent(), "mw") and self.parent().mw:
-                    self.parent().mw.statusBar().showMessage(
+                if self.parent() and self.parent().context:
+                    self.parent().context.show_status_message(
                         f"Data saved to {path}", 5000
                     )
             else:
@@ -409,10 +667,8 @@ class TDDFTDialog(QDialog):
         if path:
             success = self.spectrum.save_sticks_csv(path)
             if success:
-                # print(f"Stick data saved to {path}")
-                # QMessageBox.information(self, "Exported", f"Stick data saved to:\n{path}")
-                if hasattr(self.parent(), "mw") and self.parent().mw:
-                    self.parent().mw.statusBar().showMessage(
+                if self.parent() and self.parent().context:
+                    self.parent().context.show_status_message(
                         f"Stick data saved to {path}", 5000
                     )
             else:
@@ -431,8 +687,6 @@ class TDDFTDialog(QDialog):
         )
         if not path:
             return
-
-        import datetime
 
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -454,36 +708,26 @@ class TDDFTDialog(QDialog):
                 for item in self.excitations:
                     state = item.get("state", "?")
 
-                    # Skip Ground State if labeled '0'
                     if str(state) == "0":
                         continue
 
-                    # --- Prepare Energy Values ---
                     energy_ev = item.get("energy_ev", 0.0)
                     energy_nm = item.get("energy_nm", 0.0)
                     energy_cm = item.get("energy_cm", 0.0)
 
-                    # Auto-fill missing energy units
                     if energy_cm == 0.0 and energy_nm > 0:
                         energy_cm = 10000000.0 / energy_nm
                     if energy_ev == 0.0 and energy_nm > 0:
                         energy_ev = 1239.84193 / energy_nm
 
-                    # --- Prepare Strength Values (Length vs Velocity) ---
-                    # Oscillator Strength
-                    # 変更: デフォルトを 0.0 ではなく None にして区別する
                     f_len = item.get("osc_len", item.get("osc", None))
                     f_vel = item.get("osc_vel", None)
-
-                    # Rotatory Strength
                     r_len = item.get("rot_len", item.get("rotatory_strength", None))
                     r_vel = item.get("rot_vel", None)
 
-                    # Helper for formatting (None -> "N/A")
                     def fmt_val(v):
                         return f"{v:>9.6f}" if v is not None else "      N/A"
 
-                    # --- Writing the Block ---
                     f.write(
                         f"STATE {state:>3}  --------------------------------------------------------\n"
                     )
@@ -493,7 +737,6 @@ class TDDFTDialog(QDialog):
 
                     f.write(f"  f (Osc): L={fmt_val(f_len)}  |  V={fmt_val(f_vel)}\n")
 
-                    # Rotatory Strength (CD計算データがある場合のみ行自体を表示)
                     if r_len is not None or r_vel is not None:
                         f.write(
                             f"  R (Rot): L={fmt_val(r_len)}  |  V={fmt_val(r_vel)}\n"
@@ -501,21 +744,19 @@ class TDDFTDialog(QDialog):
 
                     f.write("\n  Major Transitions:\n")
 
-                    # Transition Details
                     transitions = item.get("transitions", [])
                     if isinstance(transitions, list):
                         if not transitions:
                             f.write("    (No transition details available)\n")
                         for trans in transitions:
-                            # Clean up formatting if needed
                             f.write(f"    {trans}\n")
                     else:
                         f.write(f"    {transitions}\n")
 
-                    f.write("\n")  # Empty line between states
+                    f.write("\n")
 
-            if hasattr(self.parent(), "mw") and self.parent().mw:
-                self.parent().mw.statusBar().showMessage(
+            if self.parent() and self.parent().context:
+                self.parent().context.show_status_message(
                     f"Report saved to {path}", 5000
                 )
             else:
@@ -533,7 +774,7 @@ class TDDFTDialog(QDialog):
         self.spin_sigma.setValue(3000.0)
         self.spin_sigma.setRange(0.1, 10000.0)
         self.spin_sigma.setSingleStep(10.0)
-        self.combo_sigma_unit.setCurrentIndex(0)  # cm-1
+        self.combo_sigma_unit.setCurrentIndex(0)
         self.prev_sigma_unit_idx = 0
         self.chk_sticks.setChecked(True)
         self.chk_physical.setChecked(True)
@@ -556,20 +797,19 @@ class TDDFTDialog(QDialog):
             return
 
         is_physical = self.chk_physical.isChecked()
-        is_cd_mode = self.radio_cd.isChecked()  # True if CD
-        gauge_mode = self.combo_gauge.currentIndex()  # 0: Length, 1: Velocity
+        is_cd_mode = self.radio_cd.isChecked()
+        gauge_mode = self.combo_gauge.currentIndex()
 
         target_key = ""
         y_unit_main = ""
         y_unit_sticks = ""
 
-        # --- 1. Key Selection & Units ---
         sample = self.excitations[0] if self.excitations else {}
 
         if not is_cd_mode:  # Absorption
-            if gauge_mode == 1:  # Velocity
+            if gauge_mode == 1:
                 target_key = "osc_vel" if "osc_vel" in sample else "osc"
-            else:  # Length
+            else:
                 target_key = "osc_len" if "osc_len" in sample else "osc"
 
             if is_physical:
@@ -580,9 +820,9 @@ class TDDFTDialog(QDialog):
                 y_unit_sticks = "f (osc)"
 
         else:  # CD
-            if gauge_mode == 1:  # Velocity
+            if gauge_mode == 1:
                 target_key = "rot_vel" if "rot_vel" in sample else "rotatory_strength"
-            else:  # Length
+            else:
                 target_key = "rot_len" if "rot_len" in sample else "rotatory_strength"
 
             if is_physical:
@@ -592,16 +832,9 @@ class TDDFTDialog(QDialog):
                 y_unit_main = "Intensity (Arb.)"
                 y_unit_sticks = "R (10⁻⁴⁰ cgs)"
 
-        # --- 2. Constants ---
-        # Absorption: Integral(epsilon) dE = 2.315e8 * f
         ABS_FACTOR = 2.315e8
-
-        # CD: Integral(DeltaEps) dE ~ R * Energy.
-        # Factor derived from R(cgs) relation.
-        # R is usually 10^-40 cgs. The factor to map to DeltaEps integral is approx 0.04355
         CD_FACTOR = 0.04355
 
-        # --- 3. Process Data ---
         processed_data = []
 
         for item in self.excitations:
@@ -612,119 +845,42 @@ class TDDFTDialog(QDialog):
 
             if is_physical:
                 if not is_cd_mode:
-                    # Absorption: Area is proportional to f (constant over energy)
                     new_item["processed_y"] = val * ABS_FACTOR
                 else:
-                    # CD: Area is proportional to R * Energy(wavenumber)
-                    # We need the energy in cm-1 for correct scaling
                     e_cm = item.get("energy_cm", 0.0)
                     if not isinstance(e_cm, (int, float)):
                         e_cm = 0.0
-
-                    # Use nm to calculate cm-1 if missing
                     if e_cm <= 0:
                         e_nm = item.get("energy_nm", 0.0)
                         if isinstance(e_nm, (int, float)) and e_nm > 0:
                             e_cm = 1e7 / e_nm
                         else:
                             e_cm = 0.0
-
-                    # 修正点: R値にエネルギーを掛けてスケーリング
                     new_item["processed_y"] = val * e_cm * CD_FACTOR
             else:
-                # Non-physical (Height = Value)
                 new_item["processed_y"] = val
 
             processed_data.append(new_item)
 
-        # --- 4. Update Widget ---
         self.spectrum.data_list = processed_data
         self.spectrum.y_key = "processed_y"
-        self.spectrum.y_key_sticks = target_key  # Sticks always show raw f or R
+        self.spectrum.y_key_sticks = target_key
 
         self.spectrum.y_unit = y_unit_main
         self.spectrum.y_unit_sticks = y_unit_sticks
 
         self.spectrum.normalization_mode = "area" if is_physical else "height"
-        self.spectrum.broaden_in_energy = (
-            True  # Always broaden in Energy for physical correctness
-        )
+        self.spectrum.broaden_in_energy = True
 
         self.spectrum.set_dual_axis(is_physical)
         self.update_spectrum_sigma()
         self.spectrum.update()
 
+        # Refresh the panel if a transition is already selected (gauge/type may have changed)
+        if self._current_item is not None:
+            self._populate_info_panel(self._current_item)
+
     def on_spectrum_click(self, item):
-        """Handle click on spectrum peak"""
-        if item is None:
-            return
-        state = item.get("state", "?")
-        energy_ev = item.get("energy_ev", 0.0)
-        energy_nm = item.get("energy_nm", 0.0)
-
-        is_cd = self.radio_cd.isChecked()
-        gauge_mode = self.combo_gauge.currentIndex()  # 0: Length, 1: Velocity
-
-        msg = f"Transition to Excited State {state}\n"
-        msg += f"Energy: {energy_ev:.4f} eV ({energy_nm:.2f} nm)\n"
-        msg += "-" * 30 + "\n"
-
-        # Show Oscillator Strengths
-        osc_len = item.get("osc_len", item.get("osc", 0.0))
-        osc_vel = item.get("osc_vel", 0.0)
-
-        # Show Rotatory Strengths
-        rot_len = item.get("rot_len", item.get("rotatory_strength", 0.0))
-        rot_vel = item.get("rot_vel", 0.0)
-
-        if not is_cd:
-            msg += "Oscillator Strength (f):\n"
-            msg += (
-                f"  - Length   : {osc_len:.6f}"
-                + (" *" if gauge_mode == 0 else "")
-                + "\n"
-            )
-            msg += (
-                f"  - Velocity : {osc_vel:.6f}"
-                + (" *" if gauge_mode == 1 else "")
-                + "\n"
-            )
-        else:
-            msg += "Rotatory Strength (R) [10⁻⁴⁰ esu² cm²]:\n"
-            msg += (
-                f"  - Length   : {rot_len:.6f}"
-                + (" *" if gauge_mode == 0 else "")
-                + "\n"
-            )
-            msg += (
-                f"  - Velocity : {rot_vel:.6f}"
-                + (" *" if gauge_mode == 1 else "")
-                + "\n"
-            )
-
-        msg += "-" * 30 + "\n"
-
-        # Use instantiated QMessageBox for selectable text
-        from PyQt6.QtCore import Qt
-
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(f"Transition Details - State {state}")
-
-        # Add scroll area if message is too long? QMessageBox doesn't support scrolling easily.
-        # But for 20 lines it's fine.
-        # Let's increase the limit or make it nicer.
-
-        if "transitions" in item:
-            trans_data = item["transitions"]
-            if trans_data and len(trans_data) > 0:
-                msg += "\nOrbital Contributions:\n"
-                # Show ALL transitions
-                msg += "\n".join(trans_data)
-            else:
-                msg += f"\n(No detailed orbital contributions found - data type: {type(trans_data)}, len: {len(trans_data) if trans_data else 0})"
-        else:
-            msg += "\n(No 'transitions' key in item)"
-
-        msg_box.setText(msg)
-        msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        msg_box.exec()
+        """Handle click on spectrum peak — show details in the right panel."""
+        self._current_item = item
+        self._populate_info_panel(item)

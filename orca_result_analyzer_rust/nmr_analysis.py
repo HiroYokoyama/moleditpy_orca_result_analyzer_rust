@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from PyQt6.QtWidgets import (
@@ -19,8 +20,9 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QButtonGroup,
     QAbstractItemView,
+    QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
+from PyQt6.QtCore import Qt, QTimer
 import pyvista as pv
 import numpy as np
 from .utils import get_default_export_path
@@ -52,7 +54,6 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from .nmr_custom_ref_dialog import CustomReferenceDialog
 from . import PLUGIN_VERSION
-
 
 
 class NMRDialog(QDialog):
@@ -231,6 +232,9 @@ class NMRDialog(QDialog):
         # Track atom labels in 3D viewer
         self._atom_labels = []
 
+        # Unsaved merge changes (merges are saved explicitly, never auto-saved)
+        self._merged_dirty = False
+
         # Track selected peaks for highlighting
         self.selected_peak_indices = set()
         self.highlight_artists = []
@@ -316,8 +320,6 @@ class NMRDialog(QDialog):
         # Custom 3D highlight actors and names
         self._nmr_sphere_actors = []
         self._nmr_label_names = []  # Explicitly track label names for removal
-
-
 
     def _check_external_selection(self):
         """Poll main window for 3D selection changes"""
@@ -431,7 +433,7 @@ class NMRDialog(QDialog):
         """Load NMR settings from JSON"""
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     settings = json.load(f)
 
                 nmr_settings = settings.get("nmr_settings", {})
@@ -448,7 +450,7 @@ class NMRDialog(QDialog):
                     for ref_name, ref_val in refs.items():
                         self.reference_standards[nucleus][ref_name] = ref_val
             except Exception as e:
-                print(f"Error loading NMR settings: {e}")
+                logging.warning("Error loading NMR settings: %s", e)
 
     def merge_selected_peaks(self):
         """Merge selected peaks into a single entry with isotope validation"""
@@ -475,7 +477,12 @@ class NMRDialog(QDialog):
                             None,
                         )
                         if item:
-                            atom_symbols.add(item.get("atom_sym", None))
+                            # A missing symbol must not count as a distinct
+                            # nucleus (and None would crash the ', '.join in
+                            # the mixed-nuclei error message below).
+                            sym = item.get("atom_sym", None)
+                            if sym:
+                                atom_symbols.add(sym)
 
         # 2. 【物理バリデーション】異なる元素が混ざっていないかチェック
         if len(atom_symbols) > 1:
@@ -509,16 +516,17 @@ class NMRDialog(QDialog):
             if reply == QMessageBox.StandardButton.No:
                 return
 
-        # 5. 新しいグループの追加と保存
+        # 5. 新しいグループの追加（保存は Save Merges ボタン / クローズ時の確認で）
         new_merged_peaks.append({"indices": selected_indices})
         self.merged_peaks = new_merged_peaks
-        self.save_merged_peaks()
+        self._mark_merges_dirty()
 
         # 6. UIのクリーンアップ
         self.clear_peak_selection()
-        if hasattr(self.parent_dlg, "mw") and hasattr(self.parent_dlg.mw, "statusBar"):
-            self.parent_dlg.mw.statusBar().showMessage(
-                f"Merged {len(selected_indices)} atoms into one peak.", 5000
+        if self.parent_dlg and self.parent_dlg.context:
+            self.parent_dlg.context.show_status_message(
+                f"Merged {len(selected_indices)} atoms into one peak (not saved yet).",
+                5000,
             )
 
         self.recalc()
@@ -549,26 +557,43 @@ class NMRDialog(QDialog):
         for group in groups_to_remove:
             self.merged_peaks.remove(group)
 
-        self.save_merged_peaks()
+        self._mark_merges_dirty()
         self.clear_peak_selection()
         self.recalc()
+
+    def _mark_merges_dirty(self):
+        """Flag in-memory merge changes as unsaved and enable the save button."""
+        self._merged_dirty = True
+        btn = getattr(self, "btn_save_merge", None)
+        if btn:
+            btn.setEnabled(True)
+
+    def save_merges_clicked(self):
+        """Persist merged peak groups to disk (explicit user action)."""
+        self.save_merged_peaks()
+        self._merged_dirty = False
+        btn = getattr(self, "btn_save_merge", None)
+        if btn:
+            btn.setEnabled(False)
+        if self.parent_dlg and self.parent_dlg.context:
+            self.parent_dlg.context.show_status_message("Merged peaks saved.", 3000)
 
     def save_merged_peaks(self):
         """Save merged peaks to JSON file"""
         try:
-            with open(self.merged_peaks_file, "w") as f:
+            with open(self.merged_peaks_file, "w", encoding="utf-8") as f:
                 json.dump(self.merged_peaks, f, indent=2)
         except Exception as e:
-            print(f"Error saving merged peaks: {e}")
+            logging.warning("Error saving merged peaks: %s", e)
 
     def load_merged_peaks(self):
         """Load merged peaks from JSON file"""
         if os.path.exists(self.merged_peaks_file):
             try:
-                with open(self.merged_peaks_file, "r") as f:
+                with open(self.merged_peaks_file, "r", encoding="utf-8") as f:
                     self.merged_peaks = json.load(f)
             except Exception as e:
-                print(f"Error loading merged peaks: {e}")
+                logging.warning("Error loading merged peaks: %s", e)
                 self.merged_peaks = []
         else:
             self.merged_peaks = []
@@ -579,10 +604,10 @@ class NMRDialog(QDialog):
         # 既存の設定を読み込む（MO設定などを消さないため）
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     all_settings = json.load(f)
             except Exception as _e:
-                logging.warning("[nmr_analysis.py:538] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         # Extract custom references only (non-default)
         # Extract custom references only (non-default)
@@ -642,10 +667,10 @@ class NMRDialog(QDialog):
         all_settings["nmr_settings"] = current_nmr_settings
 
         try:
-            with open(self.settings_file, "w") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(all_settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving NMR settings: {e}")
+            logging.warning("Error saving NMR settings: %s", e)
 
     def reset_zoom(self, event):
         """Reset plot zoom on double click"""
@@ -717,8 +742,6 @@ class NMRDialog(QDialog):
         ref_sel_row.addWidget(QLabel("Standard:"))
         self.combo_ref = QComboBox()
         self.combo_ref.setMinimumWidth(250)
-        from PyQt6.QtWidgets import QSizePolicy
-
         self.combo_ref.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -786,28 +809,52 @@ class NMRDialog(QDialog):
         self.chk_show_all_labels.stateChanged.connect(self.toggle_all_labels)
         spec_settings.addWidget(self.chk_show_all_labels)
 
+        self.chk_label_shifts = QCheckBox("Show shift values")
+        self.chk_label_shifts.setChecked(False)  # default: hide (labels stay compact)
+        self.chk_label_shifts.setToolTip(
+            "Add the chemical shift to 3D atom labels "
+            "(merged atoms show original → merged value)"
+        )
+        self.chk_label_shifts.stateChanged.connect(self.on_label_shifts_toggled)
+        spec_settings.addWidget(self.chk_label_shifts)
+
+        # Selection/merge workflow gets its own row: together with the two
+        # checkboxes and the export buttons a single line exceeds the
+        # dialog's 600px default width.
+        merge_row = QHBoxLayout()
+
         # Add button to clear selection
         btn_clear_selection = QPushButton("Clear Selection")
         btn_clear_selection.setFixedWidth(120)
         btn_clear_selection.setAutoDefault(False)
         btn_clear_selection.setToolTip("Clear all selected peaks and labels")
         btn_clear_selection.clicked.connect(self.clear_peak_selection)
-        spec_settings.addWidget(btn_clear_selection)
+        merge_row.addWidget(btn_clear_selection)
 
-        # Add merge selected button
         btn_merge = QPushButton("Merge Selected")
         btn_merge.setFixedWidth(120)
         btn_merge.setAutoDefault(False)
         btn_merge.setToolTip("Merge selected peaks into one entry")
         btn_merge.clicked.connect(self.merge_selected_peaks)
-        spec_settings.addWidget(btn_merge)
+        merge_row.addWidget(btn_merge)
 
         btn_unmerge = QPushButton("Unmerge")
         btn_unmerge.setFixedWidth(120)
         btn_unmerge.setAutoDefault(False)
         btn_unmerge.setToolTip("Separate merged peaks back to individuals")
         btn_unmerge.clicked.connect(self.unmerge_selected_peaks)
-        spec_settings.addWidget(btn_unmerge)
+        merge_row.addWidget(btn_unmerge)
+
+        self.btn_save_merge = QPushButton("Save Merges")
+        self.btn_save_merge.setFixedWidth(120)
+        self.btn_save_merge.setAutoDefault(False)
+        self.btn_save_merge.setToolTip(
+            "Persist merged peak groups to disk (merges are no longer auto-saved)"
+        )
+        self.btn_save_merge.setEnabled(False)  # enabled once there are unsaved changes
+        self.btn_save_merge.clicked.connect(self.save_merges_clicked)
+        merge_row.addWidget(self.btn_save_merge)
+        merge_row.addStretch()
 
         # new line for Real Spectrum controls
         real_spec_layout = QHBoxLayout()
@@ -902,6 +949,7 @@ class NMRDialog(QDialog):
         spec_settings.addWidget(btn_export_csv)
 
         spec_layout.addLayout(spec_settings)
+        spec_layout.addLayout(merge_row)
 
         # Matplotlib canvas - adjusted for narrower dialog
         self.figure = Figure(figsize=(5.5, 4))  # Narrower to fit 600px width
@@ -1181,13 +1229,13 @@ class NMRDialog(QDialog):
         # Now that we switched inputs (if we were in All), this should work
         self.combo_ref.setCurrentText(ref_name)
 
-        if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-            self.parent_dlg.mw.statusBar().showMessage(
+        if self.parent_dlg and self.parent_dlg.context:
+            self.parent_dlg.context.show_status_message(
                 f"Added reference '{ref_name}' for {len(nucleus_data)} nucleus/nuclei.",
                 5000,
             )
         else:
-            print(f"Added reference '{ref_name}'")
+            logging.info("Reference '%s' added.", ref_name)
 
     def delete_custom_reference(self):
         """Delete currently selected custom reference"""
@@ -1248,12 +1296,12 @@ class NMRDialog(QDialog):
                     del self.reference_standards[current_nucleus][current_ref]
                     self.save_settings()
                     self.update_reference_combo()
-                    if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-                        self.parent_dlg.mw.statusBar().showMessage(
+                    if self.parent_dlg and self.parent_dlg.context:
+                        self.parent_dlg.context.show_status_message(
                             f"Reference '{current_ref}' removed.", 5000
                         )
                     else:
-                        print(f"Reference '{current_ref}' removed.")
+                        logging.info("Reference '%s' removed.", current_ref)
                 else:
                     # Should not happen if UI is consistent
                     QMessageBox.warning(
@@ -1332,7 +1380,6 @@ class NMRDialog(QDialog):
         # Get nucleus key to handle isotopes
         key = self.get_nucleus_key(nucleus)
         # Try key, then generic element (e.g. "Pt" if "195Pt" not in defaults), then fallback
-        import re
 
         element_only = re.sub(r"[^A-Z]", "", key)
 
@@ -1603,7 +1650,7 @@ class NMRDialog(QDialog):
                 try:
                     artist.remove()
                 except Exception as _e:
-                    logging.warning("[nmr_analysis.py:1463] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
             self.highlight_artists = []
             self.canvas.draw_idle()
             return
@@ -1617,7 +1664,7 @@ class NMRDialog(QDialog):
             try:
                 artist.remove()
             except Exception as _e:
-                logging.warning("[nmr_analysis.py:1477] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         self.highlight_artists = []
 
         # Add red highlights and text labels for selected peaks
@@ -1739,12 +1786,12 @@ class NMRDialog(QDialog):
         if filename:
             try:
                 self.figure.savefig(filename, dpi=300, bbox_inches="tight")
-                if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-                    self.parent_dlg.mw.statusBar().showMessage(
+                if self.parent_dlg and self.parent_dlg.context:
+                    self.parent_dlg.context.show_status_message(
                         f"Spectrum exported to: {os.path.basename(filename)}", 5000
                     )
                 else:
-                    print(f"Spectrum exported to: {filename}")
+                    logging.info("Spectrum exported to: %s", filename)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
 
@@ -1766,7 +1813,7 @@ class NMRDialog(QDialog):
             return
 
         try:
-            with open(filename, "w") as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 # Check mode
                 is_real = (
                     getattr(self, "chk_real_spectrum", None) is not None
@@ -1787,13 +1834,13 @@ class NMRDialog(QDialog):
                         # Let's try to extract x,y data from the first non-stem line.
 
                         line = None
-                        for l in ax.lines:
+                        for ln in ax.lines:
                             # Stems are Line2D but usually handled differently.
                             # nmrsim plot is a standard plot.
-                            if l.get_marker() == "None" and l.get_linestyle() == "-":
-                                line = l
+                            if ln.get_marker() == "None" and ln.get_linestyle() == "-":
+                                line = ln
                                 # If we have multiple, the 'blue' one is the spectrum.
-                                if l.get_color() == "b":
+                                if ln.get_color() == "b":
                                     break
 
                         if line:
@@ -1829,12 +1876,12 @@ class NMRDialog(QDialog):
                         # Fallback
                         f.write("# No peak data available.\n")
 
-            if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-                self.parent_dlg.mw.statusBar().showMessage(
+            if self.parent_dlg and self.parent_dlg.context:
+                self.parent_dlg.context.show_status_message(
                     f"Spectrum data exported to: {os.path.basename(filename)}", 5000
                 )
             else:
-                print(f"Spectrum data exported to: {filename}")
+                logging.info("Spectrum data exported to: %s", filename)
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
@@ -1853,7 +1900,7 @@ class NMRDialog(QDialog):
             return
 
         try:
-            with open(filename, "w") as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 # Headers
                 headers = []
                 for c in range(self.table.columnCount()):
@@ -1872,12 +1919,12 @@ class NMRDialog(QDialog):
                         cols.append(text)
                     f.write(",".join(cols) + "\n")
 
-            if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-                self.parent_dlg.mw.statusBar().showMessage(
+            if self.parent_dlg and self.parent_dlg.context:
+                self.parent_dlg.context.show_status_message(
                     f"Table data exported to: {os.path.basename(filename)}", 5000
                 )
             else:
-                print(f"Table data exported to: {filename}")
+                logging.info("Table data exported to: %s", filename)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
 
@@ -1958,12 +2005,12 @@ class NMRDialog(QDialog):
                 cols.append(it.text() if it else "")
             text += "\t".join(cols) + "\n"
         QApplication.clipboard().setText(text)
-        if self.parent_dlg and hasattr(self.parent_dlg, "mw"):
-            self.parent_dlg.mw.statusBar().showMessage(
+        if self.parent_dlg and self.parent_dlg.context:
+            self.parent_dlg.context.show_status_message(
                 "Table data copied to clipboard!", 5000
             )
         else:
-            print("Table data copied to clipboard!")
+            logging.info("Table data copied to clipboard.")
 
     def toggle_simulation_controls(self):
         """Enable/Disable simulation spinboxes based on checkbox state"""
@@ -1983,6 +2030,10 @@ class NMRDialog(QDialog):
 
     def on_peak_click(self, event):
         """Handle clicking on a peak in the spectrum"""
+        # Only allow left-click
+        if getattr(event, "button", None) != 1:
+            return
+
         click_x = event.xdata
         if click_x is None:
             return
@@ -2047,7 +2098,7 @@ class NMRDialog(QDialog):
         for peak_idx in sorted(self.selected_peak_indices):
             if peak_idx < len(self.peaks_metadata):
                 # Get metadata for this peak (shift, intensity, is_merged, atom_indices)
-                _, _, is_merged, atom_indices = self.peaks_metadata[peak_idx]
+                peak_shift, _, is_merged, atom_indices = self.peaks_metadata[peak_idx]
 
                 # Add label for each atom in this peak (handles both merged and individual)
                 for atom_idx in atom_indices:
@@ -2059,7 +2110,20 @@ class NMRDialog(QDialog):
                     )
                     if atom_item:
                         atom_sym = atom_item.get("atom_sym", "?")
-                        self.add_atom_label(atom_idx, atom_sym)
+                        shift_text = None
+                        if self._shift_labels_enabled():
+                            # Per-atom original shift; for merged peaks show
+                            # both the atom's own value and the merged
+                            # (averaged) one.
+                            own_delta = getattr(self, "delta_ref", 0.0) + (
+                                getattr(self, "sigma_ref", 0.0)
+                                - atom_item.get("shielding", 0.0)
+                            )
+                            if is_merged:
+                                shift_text = f"δ {own_delta:.2f} → {peak_shift:.2f}"
+                            else:
+                                shift_text = f"δ {own_delta:.2f}"
+                        self.add_atom_label(atom_idx, atom_sym, shift_text)
 
         # 3. Synchronize with Main Window
         if hasattr(self.parent_dlg, "mw"):
@@ -2084,21 +2148,42 @@ class NMRDialog(QDialog):
                     try:
                         e3d.update_3d_selection_display()
                     except Exception as _e:
-                        logging.warning("[nmr_analysis.py:1880] silenced: %s", _e)
+                        logging.warning("silenced: %s", _e)
 
             # Draw yellow highlights for NMR selection
             self.draw_custom_nmr_highlights_3d(all_peak_indices)
-
-            # Debug print to confirming highlighting path is taken
-            # print(f"Highlighting {len(self.selected_peak_indices)} peaks with {len(atom_coords)} atoms")
 
             # Render once after all labels added
             v3d = getattr(self.parent_dlg.mw, "view_3d_manager", None)
             if v3d and hasattr(v3d, "plotter"):
                 v3d.plotter.render()
 
-    def add_atom_label(self, atom_idx, atom_sym):
-        """Add a single atom label to 3D viewer"""
+    def _shift_labels_enabled(self):
+        """Whether 3D labels should include chemical shift values.
+
+        Uses an explicit isinstance-free truthiness contract: the checkbox may
+        be absent on test fakes, in which case shifts stay hidden (the
+        default).
+        """
+        chk = getattr(self, "chk_label_shifts", None)
+        try:
+            return bool(chk is not None and chk.isChecked())
+        except Exception:
+            return False
+
+    def on_label_shifts_toggled(self):
+        """Re-render the current selection's labels with/without shifts."""
+        # is_external_sync=True: only refresh labels, never clear the 3D
+        # selection the user may have made in the viewer.
+        if self.selected_peak_indices:
+            self.update_selected_labels(is_external_sync=True)
+
+    def add_atom_label(self, atom_idx, atom_sym, shift_text=None):
+        """Add a single atom label to 3D viewer.
+
+        shift_text: optional second label line with the chemical shift
+        (e.g. "δ 7.26" or, for merged peaks, "δ 7.10 → 7.26").
+        """
         # Check if parent has plotter
         v3d = (
             getattr(self.parent_dlg.mw, "view_3d_manager", None)
@@ -2108,19 +2193,27 @@ class NMRDialog(QDialog):
         if not v3d or not hasattr(v3d, "plotter"):
             return
 
-        # Get coordinates
-        coords = self.parent_dlg.parser.data.get("coords", [])
-        if not coords or atom_idx >= len(coords):
-            return
+        # Get coordinates from 3D viewer to match current view
+        if hasattr(v3d, "atom_positions_3d") and atom_idx < len(v3d.atom_positions_3d):
+            pos = v3d.atom_positions_3d[atom_idx]
+        else:
+            # Fallback to parser data
+            coords = self.parent_dlg.parser.data.get("coords", [])
+            if not coords or atom_idx >= len(coords):
+                return
+            pos = coords[atom_idx]
 
         try:
-            pos = coords[atom_idx]
             label_pos = [pos[0], pos[1], pos[2] + 0.4]  # Offset above atom
+
+            label_text = f"{atom_sym}{atom_idx}"
+            if shift_text:
+                label_text += f"\n{shift_text}"
 
             label_name = f"nmr_label_{atom_idx}"
             actor = v3d.plotter.add_point_labels(
                 [label_pos],
-                [f"{atom_sym}{atom_idx}"],
+                [label_text],
                 font_size=12,
                 text_color="cyan",
                 point_size=0,
@@ -2131,7 +2224,7 @@ class NMRDialog(QDialog):
             self._atom_labels.append(actor)
             self._nmr_label_names.append(label_name)
         except Exception as e:
-            logging.warning("[nmr_analysis.py:1924] silenced: %s", e)
+            logging.warning("silenced: %s", e)
 
     def highlight_atom_in_3d(self, atom_idx, atom_sym):
         """Highlight selected atom with a label in 3D viewer (legacy - now uses update_selected_labels)"""
@@ -2147,7 +2240,7 @@ class NMRDialog(QDialog):
             try:
                 artist.remove()
             except Exception as _e:
-                logging.warning("[nmr_analysis.py:1941] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         self.highlight_artists = []
 
         # Clear 3D labels
@@ -2162,7 +2255,7 @@ class NMRDialog(QDialog):
                 try:
                     e3d.update_3d_selection_display()
                 except Exception as _e:
-                    logging.warning("[nmr_analysis.py:1956] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
         # Redraw spectrum
         if getattr(self, "canvas", None) is not None:
@@ -2207,8 +2300,6 @@ class NMRDialog(QDialog):
 
         ratio = 1.0
         lookup_sym = target_nuc_sym.upper()
-
-        import re
 
         element_only = re.sub(r"[^A-Z]", "", lookup_sym)
 
@@ -2353,8 +2444,8 @@ class NMRDialog(QDialog):
                 for i in range(0, len(vs), chunk_size):
                     v_chunk = vs[i : i + chunk_size]
                     i_chunk = is_[i : i + chunk_size]
-                    for v, I in zip(v_chunk, i_chunk):
-                        y_total += I * (
+                    for v, inten in zip(v_chunk, i_chunk):
+                        y_total += inten * (
                             gamma / (np.pi * ((x_hz_grid - v) ** 2 + gamma**2))
                         )
 
@@ -2461,7 +2552,7 @@ class NMRDialog(QDialog):
         try:
             plotter.remove_actor("nmr_selection_highlights")
         except Exception as _e:
-            logging.warning("[nmr_analysis.py:2182] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
 
         # 2. Clear labels by tracked name
         if getattr(self, "_nmr_label_names", None) is not None:
@@ -2469,7 +2560,7 @@ class NMRDialog(QDialog):
                 try:
                     plotter.remove_actor(name)
                 except Exception as _e:
-                    logging.warning("[nmr_analysis.py:2190] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
             self._nmr_label_names = []
 
         # 3. Fallback: Clear labels by list reference
@@ -2477,7 +2568,7 @@ class NMRDialog(QDialog):
             try:
                 plotter.remove_actor(actor)
             except Exception as _e:
-                logging.warning("[nmr_analysis.py:2198] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         self._atom_labels = []
 
         # 4. Clean up private spheres actor list
@@ -2486,13 +2577,13 @@ class NMRDialog(QDialog):
                 try:
                     plotter.remove_actor(actor)
                 except Exception as _e:
-                    logging.warning("[nmr_analysis.py:2207] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
             self._nmr_sphere_actors = []
 
         try:
             plotter.render()
         except Exception as _e:
-            logging.warning("[nmr_analysis.py:2213] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
 
     def draw_custom_nmr_highlights_3d(self, atom_indices):
         """Draw yellow highlight spheres for selected atoms in 3D viewer"""
@@ -2507,7 +2598,7 @@ class NMRDialog(QDialog):
         try:
             plotter.remove_actor("nmr_selection_highlights")
         except Exception as _e:
-            logging.warning("[nmr_analysis.py:2228] silenced: %s", _e)
+            logging.warning("silenced: %s", _e)
 
         # Clear tracker list to prevent stale references
         self._nmr_sphere_actors = []
@@ -2517,7 +2608,7 @@ class NMRDialog(QDialog):
             try:
                 plotter.render()
             except Exception as _e:
-                logging.warning("[nmr_analysis.py:2238] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             return
 
         indices = list(atom_indices)
@@ -2534,14 +2625,25 @@ class NMRDialog(QDialog):
 
             # Highlight sphere size: 40% (1.4x) relative to VDW radii per user request
             radii = []
+
             for i in valid_indices:
-                # Find atom symbol from parser data
-                atom_item = next(
-                    (d for d in self.data if i == d.get("atom_idx", None)), None
-                )
-                sym = atom_item.get("atom_sym", "C") if atom_item else "C"
+                try:
+                    # Try to match the exact radius used by the 3D viewer
+                    base_r = float(mw.view_3d_manager.glyph_source["radii"][i])
+                    if base_r < 0.1:
+                        raise ValueError("Radius too small")
+                except Exception:
+                    # Fallback to calculated radius if not available
+                    atom_item = next(
+                        (d for d in self.data if i == d.get("atom_idx", None)), None
+                    )
+                    sym = atom_item.get("atom_sym", "C") if atom_item else "C"
+                    # Strip isotopes like "13C" -> "C"
+                    clean_sym = re.sub(r"[^A-Za-z]", "", sym)
+                    base_r = VDW_RADII.get(clean_sym, 0.4)
+
                 # Use 1.4x scaling factor (40% larger)
-                r = VDW_RADII.get(sym, 0.4) * 1.4
+                r = base_r * 1.4
                 radii.append(r)
 
             # Create glyphs for highlights
@@ -2565,10 +2667,35 @@ class NMRDialog(QDialog):
             plotter.render()
 
         except Exception as e:
-            logging.warning("[nmr_analysis.py:2282] silenced: %s", e)
+            logging.warning("silenced: %s", e)
+
+    def reset_selection(self):
+        """Reset all NMR selection state — call this on document reset."""
+        self.sel_timer.stop()
+        try:
+            self.clear_peak_selection()
+        except Exception as _e:
+            logging.warning("[nmr_analysis.py:reset_selection] silenced: %s", _e)
+        self._last_synced_mw_selection = frozenset()
+        self.sel_timer.start(200)
 
     def closeEvent(self, event):
-        """Clean up labels when dialog closes"""
+        """Clean up labels and stop polling timer when dialog closes"""
+        # Stop the polling timer first so it cannot fire on a dead widget
+        self.sel_timer.stop()
+
+        # Merges are never auto-saved: ask the user to save or discard.
+        if getattr(self, "_merged_dirty", False):
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Merged Peaks",
+                "Merged peak changes have not been saved.\nSave them now?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard,
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self.save_merged_peaks()
+            self._merged_dirty = False
+
         self.save_settings()
         self.clear_atom_labels()
         super().closeEvent(event)

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -10,13 +11,25 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QMenuBar,
     QFileDialog,
+    QListWidget,
+    QListWidgetItem,
     QSizePolicy,
+    QApplication,
 )
-from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtCore import QSize, Qt, QObject, QEvent
+from PyQt6.QtGui import QAction, QIcon, QDesktopServices
+from PyQt6.QtCore import QSize, Qt, QObject, QEvent, QUrl
+from .parser import OrcaParser
+from .utils import (
+    normalize_atom_symbol,
+    determine_bonds_without_dummies,
+    list_orca_output_files,
+    clear_atom_color_overrides,
+)
+
 
 class _ClickFilter(QObject):
     """Qt event filter: detects non-drag left clicks on the 3D plotter widget."""
+
     def __init__(self, callback, press_callback=None, parent=None):
         super().__init__(parent)
         self._callback = callback
@@ -43,25 +56,29 @@ class _ClickFilter(QObject):
                     self._callback(rel.x(), rel.y(), obj)
         return False  # never consume -- camera interaction must keep working
 
+
 class ElidedLabel(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full_text = text
         super().setText(text)
-        
+
     def setText(self, text):
         self._full_text = text
         self._update_elided_text()
-        
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_elided_text()
-        
+
     def _update_elided_text(self):
         fm = self.fontMetrics()
         # Elide in the middle to show start and end of path
-        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideMiddle, self.width())
+        elided = fm.elidedText(
+            self._full_text, Qt.TextElideMode.ElideMiddle, self.width()
+        )
         super().setText(elided)
+
 
 try:
     from rdkit import Chem
@@ -73,20 +90,91 @@ except ImportError:
     rdDetermineBonds = None
 
 # Imported Modules for Analysis
-from .mo_analysis import MODialog
-from .freq_analysis import FrequencyDialog
-from .traj_analysis import TrajectoryResultDialog
-from .force_analysis import ForceViewerDialog
-from .charge_analysis import ChargeDialog
-from .dipole_analysis import DipoleDialog
-from .nmr_analysis import NMRDialog
-from .tddft_analysis import TDDFTDialog
-from .thermal_analysis import ThermalTableDialog
-from .scf_analysis import SCFTraceDialog
+from .mo_analysis import MODialog  # noqa: E402
+from .freq_analysis import FrequencyDialog  # noqa: E402
+from .traj_analysis import TrajectoryResultDialog  # noqa: E402
+from .force_analysis import ForceViewerDialog, ConvergenceGraphDialog  # noqa: E402
+from .charge_analysis import ChargeDialog  # noqa: E402
+from .dipole_analysis import DipoleDialog  # noqa: E402
+from .nmr_analysis import NMRDialog  # noqa: E402
+from .tddft_analysis import TDDFTDialog  # noqa: E402
+from .thermal_analysis import ThermalTableDialog  # noqa: E402
+from .scf_analysis import SCFTraceDialog  # noqa: E402
 
-from . import PLUGIN_VERSION
-import logging
-# from .logger import Logger
+from . import PLUGIN_VERSION  # noqa: E402
+import logging  # noqa: E402
+
+
+class _DirectoryFilePicker(QDialog):
+    """Simple dialog that lists *.out files in a directory for selection."""
+
+    def __init__(self, parent, directory: str, filenames: list[str]):
+        super().__init__(parent)
+        self.directory = directory
+        self.selected_path: str | None = None
+
+        self.setWindowTitle(
+            f"Select ORCA Output — {os.path.basename(directory)} ({len(filenames)} files)"
+        )
+        self.resize(500, 380)
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel(
+            f"<b>{len(filenames)}</b> file(s) found in:<br><small>{directory}</small>"
+        )
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        for name in filenames:
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, os.path.join(directory, name))
+            self._list.addItem(item)
+        self._list.itemDoubleClicked.connect(self._accept_item)
+        layout.addWidget(self._list)
+
+        btn_box = QHBoxLayout()
+        btn_ok = QPushButton("Open")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._accept_selection)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_box.addStretch()
+        btn_box.addWidget(btn_ok)
+        btn_box.addWidget(btn_cancel)
+        layout.addLayout(btn_box)
+
+        if filenames:
+            self._list.setCurrentRow(0)
+
+    def _accept_item(self, item: QListWidgetItem):
+        self.selected_path = item.data(Qt.ItemDataRole.UserRole)
+        self.accept()
+
+    def _accept_selection(self):
+        item = self._list.currentItem()
+        if item:
+            self.selected_path = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
+
+
+def build_status_suffix(data):
+    """Suffix for the status label: imaginary-mode count.
+
+    Returns (suffix, imaginary_count). suffix is "" when there is no
+    frequency data or no imaginary modes.
+    """
+    freqs = data.get("frequencies") or []
+    if not freqs:
+        return "", 0
+    imag = [f for f in freqs if f.get("freq", 0) < 0]
+    if not imag:
+        return "", 0
+    n = len(imag)
+    label = "imaginary mode" if n == 1 else "imaginary modes"
+    return f" ({n} {label})", n
 
 
 class OrcaResultAnalyzerDialog(QDialog):
@@ -99,8 +187,7 @@ class OrcaResultAnalyzerDialog(QDialog):
 
         self.setWindowTitle(f"ORCA Result Analyzer (v{PLUGIN_VERSION})")
         self.resize(450, 600)
-
-        # self.logger = Logger.get_logger("OrcaResultAnalyzerDialog")
+        self.setAcceptDrops(True)  # enable folder/file drag-and-drop
         self.init_ui()
 
         # Install global picking logic
@@ -108,12 +195,9 @@ class OrcaResultAnalyzerDialog(QDialog):
         self._enable_plotter_picking()
 
         # Update main window title to reflect ORCA result
-        if hasattr(self.mw, "init_manager"):
-            self.mw.init_manager.current_file_path = self.file_path
-        if hasattr(self.mw, "state_manager") and hasattr(
-            self.mw.state_manager, "update_window_title"
-        ):
-            self.mw.state_manager.update_window_title()
+        mw = context.get_main_window() if context is not None else self.mw
+        if mw is not None and hasattr(mw, "init_manager"):
+            mw.init_manager.current_file_path = self.file_path
 
     def get_icon(self, name):
         """Helper to load icon from icon directory"""
@@ -121,6 +205,47 @@ class OrcaResultAnalyzerDialog(QDialog):
         if os.path.exists(icon_path):
             return QIcon(icon_path)
         return QIcon()
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop: folder → Select from Directory, .out → load direct
+    # ------------------------------------------------------------------
+
+    def dragEnterEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasUrls():
+            for url in mime.urls():
+                local = url.toLocalFile()
+                if os.path.isdir(local) or local.lower().endswith(".out"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            local = url.toLocalFile()
+            if os.path.isdir(local):
+                self._open_directory_path(local)
+                return
+            if local.lower().endswith(".out") and os.path.isfile(local):
+                self.load_file(local)
+                return
+
+    def _open_directory_path(self, directory: str):
+        """Run the Select-from-Directory picker for a specific *directory*."""
+        found = list_orca_output_files(directory)
+        if not found:
+            QMessageBox.information(
+                self,
+                "No Files Found",
+                f"No ORCA output files (*.out) found in:\n{directory}",
+            )
+            return
+        if len(found) == 1:
+            self.load_file(os.path.join(directory, found[0]))
+            return
+        picker = _DirectoryFilePicker(self, directory, found)
+        if picker.exec() == QDialog.DialogCode.Accepted and picker.selected_path:
+            self.load_file(picker.selected_path)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -135,17 +260,29 @@ class OrcaResultAnalyzerDialog(QDialog):
         # File Menu
         file_menu = menu_bar.addMenu("&File")
 
-        open_action = QAction("&Open File...", self)
+        open_action = QAction("&Select File", self)
         open_action.setShortcut("Ctrl+O")
         open_action.setIcon(self.get_icon("menu_open.svg"))
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
+
+        open_dir_action = QAction("Select from &Directory", self)
+        open_dir_action.setShortcut("Ctrl+D")
+        open_dir_action.setIcon(self.get_icon("menu_open.svg"))
+        open_dir_action.triggered.connect(self.open_directory)
+        file_menu.addAction(open_dir_action)
 
         reload_action = QAction("&Reload File", self)
         reload_action.setShortcut("Ctrl+R")
         reload_action.setIcon(self.get_icon("menu_reload.svg"))
         reload_action.triggered.connect(self.reload_file)
         file_menu.addAction(reload_action)
+
+        view_output_action = QAction("Open &Output File", self)
+        view_output_action.setShortcut("Ctrl+Shift+O")
+        view_output_action.setIcon(self.get_icon("menu_output.svg"))
+        view_output_action.triggered.connect(self.open_output_file)
+        file_menu.addAction(view_output_action)
 
         file_menu.addSeparator()
 
@@ -154,6 +291,36 @@ class OrcaResultAnalyzerDialog(QDialog):
         close_action.setIcon(self.get_icon("menu_close.svg"))
         close_action.triggered.connect(self.close)
         file_menu.addAction(close_action)
+
+        # Analysis Menu (text-only; mirrors the quick-access buttons below)
+        analysis_menu = menu_bar.addMenu("&Analysis")
+        analysis_items = [
+            ("SCF Trace", self.show_scf_trace),
+            ("MO Analysis", self.show_mo_analyzer),
+            ("Optimization / Scan", self.show_trajectory),
+            ("Forces", self.show_forces),
+            ("Atomic Charges", self.show_charges),
+            ("Dipole Moment", self.show_dipole),
+            ("Frequencies", self.show_freq),
+            ("Thermochemistry", self.show_thermal),
+            ("TD-DFT", self.show_tddft),
+            ("NMR", self.show_nmr),
+            (None, None),  # separator
+            ("Properties", self.show_properties),
+            ("Bond Analysis", self.show_bond_analysis),
+            ("Energy Components", self.show_energy_components),
+        ]
+        for label, slot in analysis_items:
+            if label is None:
+                analysis_menu.addSeparator()
+                continue
+            act = QAction(label, self)
+            act.triggered.connect(slot)
+            analysis_menu.addAction(act)
+        help_menu = menu_bar.addMenu("&Help")
+        about_action = QAction("&About ORCA Result Analyzer", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
 
         # Current File Display with Open Button
         file_frame = QWidget()
@@ -189,8 +356,34 @@ class OrcaResultAnalyzerDialog(QDialog):
             "color: #0066cc; font-size: 9pt; background: transparent; border: none; padding: 0;"
         )
         self.lbl_file_dir.setToolTip(self.file_path)
-        self.lbl_file_dir.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_file_dir.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         file_info_layout.addWidget(self.lbl_file_dir)
+
+        # ORCA Run Status Label
+        status_str = (
+            self.parser.data.get("termination_status", "Running")
+            if self.parser
+            else "Unknown"
+        )
+        self.lbl_status = QLabel(f"Status: {status_str}")
+        self.lbl_status.setStyleSheet(
+            "font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+        )
+        if "Terminated normally" in status_str:
+            self.lbl_status.setStyleSheet(
+                "color: #28a745; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+            )
+        elif "Running" in status_str:
+            self.lbl_status.setStyleSheet(
+                "color: #fd7e14; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+            )
+        else:
+            self.lbl_status.setStyleSheet(
+                "color: #dc3545; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+            )
+        file_info_layout.addWidget(self.lbl_status)
 
         # Updated Time Label
         self.lbl_updated = QLabel("Updated: ---")
@@ -218,7 +411,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         btns_top_layout = QVBoxLayout()
 
         # Large Open File Button
-        btn_open_large = QPushButton("Open File...")
+        btn_open_large = QPushButton("Select File")
         btn_open_large.setIcon(self.get_icon("menu_open.svg"))
         btn_open_large.setStyleSheet("""
             QPushButton {
@@ -239,6 +432,9 @@ class OrcaResultAnalyzerDialog(QDialog):
             }
         """)
         btn_open_large.clicked.connect(self.open_file)
+        btn_open_large.setToolTip(
+            "Select ORCA Output File\nShift+Click: Select from Directory"
+        )
         btns_top_layout.addWidget(btn_open_large)
 
         # Reload Button
@@ -263,7 +459,35 @@ class OrcaResultAnalyzerDialog(QDialog):
             }
         """)
         btn_reload.clicked.connect(self.reload_file)
+        btn_reload.setToolTip("Reload the currently opened ORCA output file")
         btns_top_layout.addWidget(btn_reload)
+
+        # Open Output Button
+        self.btn_view_output = QPushButton("Open Output")
+        self.btn_view_output.setIcon(self.get_icon("menu_output.svg"))
+        self.btn_view_output.setStyleSheet("""
+            QPushButton {
+                background-color: #ffaa00;
+                color: white;
+                font-size: 10pt;
+                font-weight: bold;
+                padding: 8px 15px;
+                border-radius: 5px;
+                border: none;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #ff9900;
+            }
+            QPushButton:pressed {
+                background-color: #e68a00;
+            }
+        """)
+        self.btn_view_output.clicked.connect(self.open_output_file)
+        self.btn_view_output.setToolTip(
+            "Open the raw ORCA output file in the text viewer"
+        )
+        btns_top_layout.addWidget(self.btn_view_output)
 
         file_frame_layout.addLayout(btns_top_layout)
 
@@ -329,6 +553,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.btn_forces.setIcon(self.get_icon("icon_forces.svg"))
         self.btn_forces.setIconSize(icon_size)
         self.btn_forces.setStyleSheet(button_style)
+        # Shift+click → open convergence graph directly; plain click → force viewer
         self.btn_forces.clicked.connect(self.show_forces)
         grid.addWidget(self.btn_forces, 1, 1)
 
@@ -394,11 +619,14 @@ class OrcaResultAnalyzerDialog(QDialog):
     def _enable_plotter_picking(self):
         """Install Qt event filter on the 3D plotter widget for atom click detection."""
         try:
-            if not hasattr(self, "mw"): return
+            if not hasattr(self, "mw"):
+                return
             v3d = getattr(self.mw, "view_3d_manager", None)
-            if not v3d: return
+            if not v3d:
+                return
             plotter = getattr(v3d, "plotter", None)
-            if not plotter: return
+            if not plotter:
+                return
             self._click_filter = _ClickFilter(
                 self._on_plotter_click,
                 press_callback=self._on_plotter_press,
@@ -411,7 +639,8 @@ class OrcaResultAnalyzerDialog(QDialog):
     def _disable_plotter_picking(self):
         """Remove the event filter from the 3D plotter widget."""
         try:
-            if not hasattr(self, "mw"): return
+            if not hasattr(self, "mw"):
+                return
             v3d = getattr(self.mw, "view_3d_manager", None)
             plotter = getattr(v3d, "plotter", None) if v3d else None
             if plotter and self._click_filter:
@@ -425,23 +654,35 @@ class OrcaResultAnalyzerDialog(QDialog):
         try:
             import vtk
             import numpy as np
-            if not hasattr(self, "mw"): return None
+
+            if not hasattr(self, "mw"):
+                return None
             v3d = getattr(self.mw, "view_3d_manager", None)
-            if not v3d: return None
+            if not v3d:
+                return None
             plotter = getattr(v3d, "plotter", None)
-            if not plotter: return None
+            if not plotter:
+                return None
             atom_actor = getattr(v3d, "atom_actor", None)
-            if atom_actor is None: return None
+            if atom_actor is None:
+                return None
             atom_positions = getattr(v3d, "atom_positions_3d", None)
-            if atom_positions is None or len(atom_positions) == 0: return None
-            vtk_y = widget.height() - y
+            if atom_positions is None or len(atom_positions) == 0:
+                return None
+            # Scale Qt logical px → VTK physical px for HiDPI/Retina (macOS
+            # devicePixelRatio 2); without it the pick lands toward the bottom-
+            # left and you must click up-and-right. No-op on Windows/Linux.
+            ratio = widget.devicePixelRatioF()
+            px = x * ratio
+            vtk_y = (widget.height() - y) * ratio
             picker = vtk.vtkCellPicker()
             picker.SetTolerance(0.005)
-            picker.Pick(x, vtk_y, 0, plotter.renderer)
-            if picker.GetActor() is not atom_actor: return None
+            picker.Pick(px, vtk_y, 0, plotter.renderer)
+            if picker.GetActor() is not atom_actor:
+                return None
             pick_pos = picker.GetPickPosition()
             diffs = atom_positions - np.array(pick_pos)
-            return int(np.argmin((diffs ** 2).sum(axis=1)))
+            return int(np.argmin((diffs**2).sum(axis=1)))
         except Exception as e:
             logging.error("GUI _pick_atom_at error: %s", e)
             return None
@@ -450,19 +691,21 @@ class OrcaResultAnalyzerDialog(QDialog):
         self._pending_click_atom = None
         try:
             best_idx = self._pick_atom_at(x, y, widget)
-            if best_idx is None: return
+            if best_idx is None:
+                return
             self._pending_click_atom = best_idx
         except Exception as e:
             logging.error("GUI press handler error: %s", e)
 
     def _on_plotter_click(self, x, y, widget):
         try:
-            from PyQt6.QtWidgets import QApplication
             best_idx = getattr(self, "_pending_click_atom", None)
             self._pending_click_atom = None
-            if not hasattr(self, "mw"): return
+            if not hasattr(self, "mw"):
+                return
             e3d = getattr(self.mw, "edit_3d_manager", None)
-            if not e3d: return
+            if not e3d:
+                return
 
             if best_idx is None:
                 # Clicked empty space -> clear selection
@@ -478,11 +721,14 @@ class OrcaResultAnalyzerDialog(QDialog):
                 else:
                     e3d.selected_atoms_3d.add(best_idx)
             else:
-                if best_idx in e3d.selected_atoms_3d and len(e3d.selected_atoms_3d) == 1:
+                if (
+                    best_idx in e3d.selected_atoms_3d
+                    and len(e3d.selected_atoms_3d) == 1
+                ):
                     e3d.selected_atoms_3d.clear()
                 else:
                     e3d.selected_atoms_3d = {best_idx}
-                    
+
             if hasattr(e3d, "update_selection_visuals"):
                 e3d.update_selection_visuals()
         except Exception as e:
@@ -495,12 +741,16 @@ class OrcaResultAnalyzerDialog(QDialog):
             "freq_dlg",
             "traj_dlg",
             "forces_dlg",
+            "conv_graph_dlg",
             "thermal_dlg",
             "tddft_dlg",
             "dipole_dlg",
             "charges_dlg",
             "nmr_dlg",
             "scf_dlg",
+            "props_dlg",
+            "bond_dlg",
+            "energy_dlg",
         ]
         for attr in dialog_attrs:
             if getattr(self, attr, None) is not None:
@@ -509,7 +759,7 @@ class OrcaResultAnalyzerDialog(QDialog):
                     try:
                         dlg.close()
                     except Exception as _e:
-                        logging.warning("[gui.py:319] silenced: %s", _e)
+                        logging.warning("silenced: %s", _e)
                 setattr(self, attr, None)
 
     def closeEvent(self, event):
@@ -518,7 +768,23 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.close_all_sub_dialogs()
         super().closeEvent(event)
 
+    def show_about(self):
+        """Show About dialog."""
+        QMessageBox.about(
+            self,
+            "About ORCA Result Analyzer",
+            f"<b>ORCA Result Analyzer v{PLUGIN_VERSION}</b><br><br>"
+            "Comprehensive analyzer for ORCA quantum chemistry output files.<br><br>"
+            "<b>Author:</b> Hiromichi Yokoyama<br>"
+            "<b>License:</b> GPL-3.0 License<br>"
+            '<b>GitHub:</b> <a href="https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin">https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin</a>',
+        )
+
     def open_file(self):
+        # Shift+click → open directory picker instead
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.open_directory()
+            return
         # Get last directory from current file
         start_dir = os.path.dirname(self.file_path) if self.file_path else ""
 
@@ -534,6 +800,11 @@ class OrcaResultAnalyzerDialog(QDialog):
         """Load a file and update UI"""
         # Close existing dialogs to prevent confusion
         self.close_all_sub_dialogs()
+
+        # New result loaded — any atom colors applied to the previous
+        # molecule's indices must not bleed onto this (possibly
+        # differently-indexed) one.
+        clear_atom_color_overrides(self.mw)
 
         try:
             content = ""
@@ -551,8 +822,6 @@ class OrcaResultAnalyzerDialog(QDialog):
             if not found:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
-
-            from .parser import OrcaParser
 
             new_parser = OrcaParser()
             new_parser.load_from_memory(content, path)
@@ -594,16 +863,12 @@ class OrcaResultAnalyzerDialog(QDialog):
                             new_parser.data["atoms"] = trj_steps[-1]["atoms"]
                             new_parser.data["coords"] = trj_steps[-1]["coords"]
 
-                        # print(f"Loaded NEB Trajectory: {len(trj_steps)} frames from {os.path.basename(trj_path)}")
-                        self.mw.statusBar().showMessage(
+                        self.context.show_status_message(
                             f"Loaded NEB Trajectory from {os.path.basename(trj_path)}",
                             5000,
                         )
                 except Exception as e:
-                    # print(f"Failed to load associated TRJ: {e}")
-                    logging.warning("[gui.py:404] silenced: %s", e)
-            else:
-                pass
+                    logging.warning("silenced: %s", e)
 
             self.parser = new_parser
             self.file_path = path
@@ -611,21 +876,16 @@ class OrcaResultAnalyzerDialog(QDialog):
             # --- Sync with Main Window Title ---
             if hasattr(self.mw, "init_manager"):
                 self.mw.init_manager.current_file_path = path
-            if hasattr(self.mw, "state_manager") and hasattr(
-                self.mw.state_manager, "update_window_title"
-            ):
-                self.mw.state_manager.update_window_title()
 
             # Update File Info Labels
             self.update_file_info_labels()
 
-            # Auto-load 3D structure
-            self.load_structure_3d()
+            # Auto-load 3D structure. This is a fresh file load, so frame the
+            # molecule once (fit_camera=True); later analysis popups won't refit.
+            self.load_structure_3d(fit_camera=True)
             self.update_button_states()
 
-            # QMessageBox.information(self, "Loaded", f"Successfully loaded:\n{os.path.basename(path)}")
-            # print(f"Successfully loaded: {os.path.basename(path)}")
-            self.mw.statusBar().showMessage(
+            self.context.show_status_message(
                 f"Successfully loaded: {os.path.basename(path)}", 5000
             )
 
@@ -647,12 +907,10 @@ class OrcaResultAnalyzerDialog(QDialog):
         mtime_str = "---"
         if self.file_path and os.path.exists(self.file_path):
             try:
-                from datetime import datetime
-
                 dt = datetime.fromtimestamp(os.path.getmtime(self.file_path))
                 mtime_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             except Exception as _e:
-                logging.warning("[gui.py:446] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
 
         if getattr(self, "lbl_updated", None) is not None:
             self.lbl_updated.setText(f"Updated: {mtime_str}")
@@ -662,6 +920,41 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "lbl_version", None) is not None:
             self.lbl_version.setText(f"ORCA Version: {v}")
 
+        # ORCA Run Status
+        if not self.file_path:
+            status = "No file loaded"
+        else:
+            status = (
+                self.parser.data.get("termination_status", "Running")
+                if self.parser
+                else "Unknown"
+            )
+        if getattr(self, "lbl_status", None) is not None:
+            suffix, imag_count = (
+                build_status_suffix(self.parser.data) if self.parser else ("", 0)
+            )
+            self.lbl_status.setText(f"Status: {status}{suffix}")
+            if "Terminated normally" in status and imag_count > 0:
+                self.lbl_status.setStyleSheet(
+                    "color: #fd7e14; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+                )
+            elif "Terminated normally" in status:
+                self.lbl_status.setStyleSheet(
+                    "color: #28a745; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+                )
+            elif "Running" in status:
+                self.lbl_status.setStyleSheet(
+                    "color: #fd7e14; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+                )
+            elif "No file loaded" in status:
+                self.lbl_status.setStyleSheet(
+                    "color: #6c757d; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+                )
+            else:
+                self.lbl_status.setStyleSheet(
+                    "color: #dc3545; font-size: 9pt; font-weight: bold; background: transparent; border: none; padding: 0;"
+                )
+
     def reload_file(self):
         if self.file_path and os.path.exists(self.file_path):
             self.load_file(self.file_path)
@@ -669,6 +962,24 @@ class OrcaResultAnalyzerDialog(QDialog):
             QMessageBox.warning(
                 self, "Error", "No file currently loaded or file not found."
             )
+
+    def open_output_file(self):
+        if self.file_path and os.path.exists(self.file_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.file_path))
+        else:
+            QMessageBox.warning(
+                self, "Error", "No output file path available or file does not exist."
+            )
+
+    def open_directory(self):
+        """Scan a directory for ORCA .out files and let the user pick one."""
+        start_dir = os.path.dirname(self.file_path) if self.file_path else ""
+        chosen_dir = QFileDialog.getExistingDirectory(
+            self, "Select from Directory", start_dir
+        )
+        if not chosen_dir:
+            return
+        self._open_directory_path(chosen_dir)
 
     def update_button_states(self):
         data = self.parser.data
@@ -727,15 +1038,15 @@ class OrcaResultAnalyzerDialog(QDialog):
         if not has_forces:
             tooltip = "No gradients or optimization trajectory found"
         elif grads:
-            tooltip = "View Forces (Gradients)"
+            tooltip = (
+                "View Forces (Gradients)\nShift+Click: Open convergence graph directly"
+            )
         elif scan_steps:
-            tooltip = "View trajectory steps"
+            tooltip = (
+                "View trajectory steps\nShift+Click: Open convergence graph directly"
+            )
         self.btn_forces.setToolTip(tooltip)
 
-        bool(
-            data.get("thermal")
-            or (data.get("frequencies", None) and "thermo" in str(data))
-        )
         self.btn_therm.setEnabled(bool(data.get("thermal")))
 
         has_tddft = bool(data.get("tddft"))
@@ -755,8 +1066,14 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.btn_scf.setEnabled(has_scf)
         self.btn_scf.setToolTip("" if has_scf else "No SCF iteration data found")
 
-    def load_structure_3d(self):
-        # Helper to ensure 3D structure is loaded
+    def load_structure_3d(self, fit_camera=False):
+        # Helper to ensure the 3D structure is (re)drawn.
+        #
+        # Analysis dialogs redraw the optimized/final molecule on popup so the
+        # 3D view always matches the data being shown (accurate result), but
+        # they must NOT refit the camera — the user's current zoom and
+        # orientation are preserved. Only an explicit file load passes
+        # fit_camera=True to frame a freshly loaded molecule.
         atoms = self.parser.data.get("atoms", [])
         coords = self.parser.data.get("coords", [])
 
@@ -771,7 +1088,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             conf = Chem.Conformer(len(atoms))
 
             for i, sym in enumerate(atoms):
-                idx = mol.AddAtom(Chem.Atom(sym))
+                idx = mol.AddAtom(Chem.Atom(normalize_atom_symbol(sym)))
                 x, y, z = coords[i]
                 conf.SetAtomPosition(idx, Point3D(x, y, z))
 
@@ -781,21 +1098,18 @@ class OrcaResultAnalyzerDialog(QDialog):
             # DetermineBonds on a read-only Mol silently fails.
             # Skip if any animation is currently playing (traj or freq) — the result
             # would be immediately overwritten and the cost is wasted.
-            _traj_playing = (
-                getattr(self, "traj_dlg", None) is not None
-                and getattr(self.traj_dlg, "is_playing", False)
+            _traj_playing = getattr(self, "traj_dlg", None) is not None and getattr(
+                self.traj_dlg, "is_playing", False
             )
-            _freq_playing = (
-                getattr(self, "freq_dlg", None) is not None
-                and getattr(self.freq_dlg, "is_playing", False)
+            _freq_playing = getattr(self, "freq_dlg", None) is not None and getattr(
+                self.freq_dlg, "is_playing", False
             )
-            if rdDetermineBonds and not (_traj_playing or _freq_playing):
-                try:
-                    charge = self.parser.data.get("charge", 0)
-                    rdDetermineBonds.DetermineConnectivity(mol)
-                    rdDetermineBonds.DetermineBondOrders(mol, charge=charge)
-                except Exception:
-                    pass  # Non-fatal; some charge states are unsupported
+            if not (_traj_playing or _freq_playing):
+                charge = self.parser.data.get("charge", 0)
+                # determine_bonds_without_dummies excludes dummy ('*') atoms
+                # from the sub-molecule passed to RDKit, preventing crashes
+                # when QM point charges or ghost atoms are present.
+                determine_bonds_without_dummies(mol, charge=charge, bond_orders=True)
 
             final_mol = mol.GetMol()
 
@@ -803,10 +1117,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             if hasattr(self.mw, "current_mol"):
                 self.mw.current_mol = final_mol
 
-            if hasattr(self.mw, "view_3d_manager") and hasattr(
-                self.mw.view_3d_manager, "draw_molecule_3d"
-            ):
-                self.mw.view_3d_manager.draw_molecule_3d(final_mol)
+            self.context.draw_molecule_3d(final_mol)
 
             # Sync with main window features
             if hasattr(self.mw, "ui_manager"):
@@ -814,28 +1125,41 @@ class OrcaResultAnalyzerDialog(QDialog):
                 self.mw.is_xyz_derived = True
 
                 # Enter 3D mode which enables export/analysis buttons and hides 2D panel
-                if hasattr(self.mw.ui_manager, "_enter_3d_viewer_ui_mode"):
+                if hasattr(self.context, "enter_3d_viewer_mode"):
+                    self.context.enter_3d_viewer_mode()
+                elif hasattr(self.mw.ui_manager, "_enter_3d_viewer_ui_mode"):
                     self.mw.ui_manager._enter_3d_viewer_ui_mode()
-                elif hasattr(self.mw.ui_manager, "_enable_3d_features"):
-                    self.mw.ui_manager._enable_3d_features(True)
+                else:
+                    self.context.set_3d_features_enabled(True)
                     if hasattr(self.mw.ui_manager, "minimize_2d_panel"):
                         self.mw.ui_manager.minimize_2d_panel()
 
-            # Reset 3D camera to fit molecule
-            if hasattr(self.mw, "view_3d_manager") and hasattr(
+            # Fit the camera only on an explicit file load. On analysis-dialog
+            # popups (fit_camera=False) the molecule is redrawn above but the
+            # camera is left untouched, preserving the user's zoom/orientation.
+            if fit_camera:
+                try:
+                    self.context.reset_3d_camera()
+                    if hasattr(self.mw, "view_3d_manager") and hasattr(
+                        self.mw.view_3d_manager, "plotter"
+                    ):
+                        self.mw.view_3d_manager.plotter.render()
+                except Exception as _e:
+                    logging.warning("3D camera/render update failed: %s", _e)
+            elif hasattr(self.mw, "view_3d_manager") and hasattr(
                 self.mw.view_3d_manager, "plotter"
             ):
+                # Still render so the redrawn structure is shown immediately.
                 try:
-                    self.mw.view_3d_manager.plotter.reset_camera()
                     self.mw.view_3d_manager.plotter.render()
                 except Exception as _e:
-                    logging.warning("[gui.py:592] silenced: %s", _e)
-        except Exception:
-            # self.logger.error(f"Error loading 3D: {e}")
-            # print(f"Error loading 3D: {e}")
-            import traceback
-
-            traceback.print_exc()
+                    logging.warning("3D render update failed: %s", _e)
+        except Exception as e:
+            logging.error(
+                "[gui.py:load_structure_3d] Failed to load 3D structure: %s",
+                e,
+                exc_info=True,
+            )
 
     def show_mo_analyzer(self):
         self.load_structure_3d()
@@ -869,7 +1193,9 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "freq_dlg", None) is not None and self.freq_dlg is not None:
             self.freq_dlg.close()
 
-        self.freq_dlg = FrequencyDialog(self.mw, freqs, atoms, coords)
+        self.freq_dlg = FrequencyDialog(
+            self.mw, freqs, atoms, coords, context=self.context
+        )
         self.freq_dlg.show()
 
     def show_trajectory(self):
@@ -892,10 +1218,38 @@ class OrcaResultAnalyzerDialog(QDialog):
             base_dir=base_dir,
             output_path=self.file_path,
             predicted_trj=parsed_trj,
+            context=self.context,
         )
         self.traj_dlg.show()
 
+    def show_convergence_graph_direct(self):
+        """Open the convergence graph directly (Shift+click shortcut), without the force viewer."""
+        scan_steps = self.parser.data.get("scan_steps", [])
+        if not scan_steps:
+            QMessageBox.warning(
+                self, "No Convergence Data", "No optimization trajectory steps found."
+            )
+            return
+        # Find the current step index based on which step has data
+        has_conv = [bool(s.get("convergence")) for s in scan_steps]
+        current_idx = next(
+            (len(scan_steps) - 1 - i for i, v in enumerate(reversed(has_conv)) if v),
+            0,
+        )
+        if getattr(self, "conv_graph_dlg", None) is not None:
+            try:
+                self.conv_graph_dlg.close()
+            except Exception:
+                logging.debug("Closing previous convergence graph failed", exc_info=True)
+        self.conv_graph_dlg = ConvergenceGraphDialog(self, scan_steps, current_idx)
+        self.conv_graph_dlg.show()
+
     def show_forces(self):
+        # Shift+click → open convergence graph directly instead
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.show_convergence_graph_direct()
+            return
+
         grads = self.parser.data.get("gradients", [])
         has_scan = bool(self.parser.data.get("scan_steps"))
 
@@ -995,5 +1349,58 @@ class OrcaResultAnalyzerDialog(QDialog):
             return
         if getattr(self, "scf_dlg", None) is not None and self.scf_dlg is not None:
             self.scf_dlg.close()
-        self.scf_dlg = SCFTraceDialog(self, data)
+        self.scf_dlg = SCFTraceDialog(
+            self,
+            data,
+            dispersion=self.parser.data.get("dispersion"),
+            spin_s2=self.parser.data.get("spin_s2"),
+        )
         self.scf_dlg.show()
+
+    def show_properties(self):
+        from .property_analysis import PropertiesDialog
+
+        if getattr(self, "props_dlg", None) is not None:
+            try:
+                self.props_dlg.close()
+            except Exception as _e:
+                logging.warning("silenced: %s", _e)
+        self.props_dlg = PropertiesDialog(self, self.parser.data)
+        self.props_dlg.show()
+
+    def show_bond_analysis(self):
+        from .bond_analysis import BondAnalysisDialog
+
+        data = self.parser.data
+        if not (
+            data.get("mayer_bond_orders")
+            or data.get("nbo_orbitals")
+            or data.get("nbo_perturbation")
+        ):
+            QMessageBox.warning(self, "No Info", "No bond-analysis data found.")
+            return
+        if getattr(self, "bond_dlg", None) is not None:
+            try:
+                self.bond_dlg.close()
+            except Exception as _e:
+                logging.warning("silenced: %s", _e)
+        self.bond_dlg = BondAnalysisDialog(self, data)
+        self.bond_dlg.show()
+
+    def show_energy_components(self):
+        from .energy_analysis import EnergyComponentsDialog
+
+        if not self.parser.data.get("energy_components"):
+            QMessageBox.information(
+                self,
+                "Energy Components",
+                "No post-HF energy components found (HF/DFT result).",
+            )
+            return
+        if getattr(self, "energy_dlg", None) is not None:
+            try:
+                self.energy_dlg.close()
+            except Exception as _e:
+                logging.warning("silenced: %s", _e)
+        self.energy_dlg = EnergyComponentsDialog(self, self.parser.data)
+        self.energy_dlg.show()

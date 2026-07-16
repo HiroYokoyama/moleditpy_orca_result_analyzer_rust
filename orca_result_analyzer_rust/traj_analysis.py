@@ -25,7 +25,12 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer
-from .utils import get_default_export_path
+from .parser import OrcaParser
+from .utils import (
+    get_default_export_path,
+    normalize_atom_symbol,
+    determine_bonds_without_dummies,
+)
 import logging
 
 try:
@@ -62,12 +67,18 @@ class TrajectoryResultDialog(QDialog):
         base_dir=None,
         output_path=None,
         predicted_trj=None,
+        context=None,
     ):
         super().__init__()
         self.setWindowTitle(title)
         self.resize(800, 600)
         self.base_dir = base_dir
         self.gl_widget = gl_widget
+        self.context = context
+        # Filter out steps with zero energy (incomplete cycles in running calculations)
+        steps = [
+            s for s in steps if s.get("energy") is not None and abs(s["energy"]) > 1e-9
+        ]
         self.steps = steps  # Current steps to display
         self.charge = charge
         self.output_path = output_path
@@ -173,7 +184,7 @@ class TrajectoryResultDialog(QDialog):
                         loaded = True
                         break
                     except Exception as e:
-                        logging.warning("[traj_analysis.py:133] silenced: %s", e)
+                        logging.warning("silenced: %s", e)
 
             if not loaded and self.base_dir:
                 # 2. Heuristic: look for unique *_MEP_trj.xyz in base_dir
@@ -188,7 +199,7 @@ class TrajectoryResultDialog(QDialog):
                         self.load_external_trj(full_path, silent=True)
                         loaded = True
                 except Exception as _e:
-                    logging.warning("[traj_analysis.py:144] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
             if not loaded:
                 # 3. Last resort: prompt user
@@ -306,6 +317,12 @@ class TrajectoryResultDialog(QDialog):
             self.btn_play.setEnabled(False)
         btn_layout.addWidget(self.btn_play)
 
+        self.btn_first = QPushButton("|<")
+        self.btn_first.setFixedWidth(30)
+        self.btn_first.setToolTip("Go to first step")
+        self.btn_first.clicked.connect(self.go_to_first_frame)
+        btn_layout.addWidget(self.btn_first)
+
         self.btn_prev = QPushButton("<")
         self.btn_prev.setFixedWidth(30)
         self.btn_prev.clicked.connect(self.prev_frame)
@@ -315,6 +332,12 @@ class TrajectoryResultDialog(QDialog):
         self.btn_next.setFixedWidth(30)
         self.btn_next.clicked.connect(self.next_frame)
         btn_layout.addWidget(self.btn_next)
+
+        self.btn_last = QPushButton(">|")
+        self.btn_last.setFixedWidth(30)
+        self.btn_last.setToolTip("Go to last step")
+        self.btn_last.clicked.connect(self.go_to_last_frame)
+        btn_layout.addWidget(self.btn_last)
 
         btn_layout.addWidget(QLabel(" | FPS:"))
         self.spin_fps = QSpinBox()
@@ -515,6 +538,22 @@ class TrajectoryResultDialog(QDialog):
         self._highlight_marker = None
         self._highlight_line = None
 
+        if not self.steps or not self.display_energies:
+            self.scatter = None
+            self.canvas.axes.text(
+                0.5,
+                0.5,
+                "No optimization/scan data found",
+                ha="center",
+                va="center",
+                transform=self.canvas.axes.transAxes,
+            )
+            self.canvas.axes.set_xlabel("Step")
+            self.canvas.axes.set_ylabel("Energy")
+            self.canvas.axes.set_title("Energy Profile")
+            self.canvas.draw_idle()
+            return
+
         if self.show_coord_x:
             # Try to get scan values or NEB distances.
             # Use explicit None checks so that 0.0 (first NEB image) is not skipped.
@@ -593,12 +632,17 @@ class TrajectoryResultDialog(QDialog):
             try:
                 self._highlight_marker.remove()
             except Exception as _e:
-                logging.warning("[traj_analysis.py:520] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
         if getattr(self, "_highlight_line", None) is not None:
             try:
                 self._highlight_line.remove()
             except Exception as _e:
-                logging.warning("[traj_analysis.py:523] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
+
+        if not self.display_energies or idx < 0 or idx >= len(self.display_energies):
+            return
+        if not self.steps or idx >= len(self.steps):
+            return
 
         y = self.display_energies[idx]
 
@@ -631,7 +675,7 @@ class TrajectoryResultDialog(QDialog):
 
     def on_step_changed(self, idx):
         # Bounds check to prevent IndexError during mode transitions
-        if idx < 0 or idx >= len(self.steps):
+        if idx < 0 or idx >= len(self.steps) or idx >= len(self.display_energies):
             return
 
         self.highlight_point(idx)
@@ -669,13 +713,10 @@ class TrajectoryResultDialog(QDialog):
             return
         mol = Chem.RWMol()
         conf = Chem.Conformer()
-        pt = self._periodic_table
         try:
             for i, sym in enumerate(atoms):
-                if ":" in sym:
-                    sym = sym.split(":")[0]
-                an = pt.GetAtomicNumber(sym)
-                mol.AddAtom(Chem.Atom(an))
+                rdkit_sym = normalize_atom_symbol(sym)
+                mol.AddAtom(Chem.Atom(rdkit_sym))
                 conf.SetAtomPosition(
                     i, Point3D(coords[i][0], coords[i][1], coords[i][2])
                 )
@@ -684,17 +725,12 @@ class TrajectoryResultDialog(QDialog):
 
         mol.AddConformer(conf)
 
-        # Determine bonds and bond orders.
-        # Skip DetermineBondOrders only during animation playback to avoid per-frame
-        # latency; connectivity is sufficient while playing.  On load and on close the
-        # full bond-order pass always runs so the main window gets accurate bond types.
-        if rdDetermineBonds:
-            try:
-                rdDetermineBonds.DetermineConnectivity(mol)
-                if not self.is_playing:
-                    rdDetermineBonds.DetermineBondOrders(mol, charge=self.charge)
-            except Exception:
-                pass  # RDKit bond determination fails for some charge states; non-fatal
+        # Determine bonds — skip dummy atoms to avoid RDKit crashes.
+        # Skip DetermineBondOrders during animation playback to avoid per-frame
+        # latency; connectivity is sufficient while playing.
+        determine_bonds_without_dummies(
+            mol, charge=self.charge, bond_orders=not self.is_playing
+        )
 
         final_mol = mol.GetMol()
 
@@ -702,9 +738,9 @@ class TrajectoryResultDialog(QDialog):
         if hasattr(self.gl_widget, "current_mol"):
             self.gl_widget.current_mol = final_mol
 
-        if hasattr(self.gl_widget, "view_3d_manager") and hasattr(
-            self.gl_widget.view_3d_manager, "draw_molecule_3d"
-        ):
+        if self.context:
+            self.context.draw_molecule_3d(final_mol)
+        elif hasattr(self.gl_widget, "view_3d_manager"):
             self.gl_widget.view_3d_manager.draw_molecule_3d(final_mol)
         elif hasattr(self.gl_widget, "draw_molecule_3d"):
             self.gl_widget.draw_molecule_3d(final_mol)
@@ -737,8 +773,6 @@ class TrajectoryResultDialog(QDialog):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            from .parser import OrcaParser
-
             parser = OrcaParser()
             steps = parser.parse_xyz_content(content)
             if not steps:
@@ -747,6 +781,13 @@ class TrajectoryResultDialog(QDialog):
                         self, "Error", "No valid steps found in XYZ file."
                     )
                 return
+
+            # Filter out steps with zero energy (incomplete cycles in running calculations)
+            steps = [
+                s
+                for s in steps
+                if s.get("energy") is not None and abs(s["energy"]) > 1e-9
+            ]
 
             # Merge dist from existing steps into new steps if lengths match
             # (Preserves Path Summary distances even if XYZ lacks them)
@@ -761,7 +802,7 @@ class TrajectoryResultDialog(QDialog):
             # Keep all_steps and scan_points consistent with the new data
             self.all_steps = steps
             self.scan_points = self.compute_scan_points(steps)
-            
+
             # Update View toggles
             has_distinction = len(self.scan_points) < len(self.all_steps)
             self.radio_full.setEnabled(has_distinction)
@@ -820,32 +861,42 @@ class TrajectoryResultDialog(QDialog):
 
             # Enter 3D mode which enables export/analysis buttons and hides 2D panel
             if hasattr(mw, "ui_manager"):
-                if hasattr(mw.ui_manager, "_enter_3d_viewer_ui_mode"):
+                if hasattr(mw.ui_manager, "enter_3d_viewer_mode"):
+                    try:
+                        mw.ui_manager.enter_3d_viewer_mode()
+                    except Exception as _e:
+                        logging.warning("[traj_analysis.py] silenced: %s", _e)
+                elif hasattr(mw.ui_manager, "_enter_3d_viewer_ui_mode"):
                     try:
                         mw.ui_manager._enter_3d_viewer_ui_mode()
                     except Exception as _e:
-                        logging.warning("[traj_analysis.py:699] silenced: %s", _e)
-                elif hasattr(mw.ui_manager, "_enable_3d_features"):
+                        logging.warning("silenced: %s", _e)
+                else:
                     try:
-                        mw.ui_manager._enable_3d_features(True)
+                        self.context.set_3d_features_enabled(True)
                         if hasattr(mw.ui_manager, "minimize_2d_panel"):
                             mw.ui_manager.minimize_2d_panel()
                     except Exception as _e:
-                        logging.warning("[traj_analysis.py:705] silenced: %s", _e)
+                        logging.warning("silenced: %s", _e)
             elif hasattr(mw, "init_manager") and hasattr(mw.init_manager, "splitter"):
                 # Fallback for manual splitter manipulation if ui_manager is missing
                 try:
                     total = mw.init_manager.splitter.width()
                     mw.init_manager.splitter.setSizes([0, total])
                 except Exception as _e:
-                    logging.warning("[traj_analysis.py:711] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
             # Reset Camera
-            if hasattr(mw, "plotter") and mw.plotter:
+            if self.context:
+                try:
+                    self.context.reset_3d_camera()
+                except Exception as _e:
+                    logging.warning("silenced: %s", _e)
+            elif hasattr(mw, "plotter") and mw.plotter:
                 try:
                     mw.plotter.reset_camera()
                 except Exception as _e:
-                    logging.warning("[traj_analysis.py:717] silenced: %s", _e)
+                    logging.warning("silenced: %s", _e)
 
             # Only show message if manual load (optional, or just show it)
             # QMessageBox.information(self, "Loaded", f"Loaded {len(steps)} frames from TRJ.")
@@ -858,16 +909,29 @@ class TrajectoryResultDialog(QDialog):
         if self.steps and not self.steps[0].get("atoms", None):
             return
 
+        # Only allow left-click
+        mouseevent = getattr(event, "mouseevent", None)
+        if mouseevent is None or mouseevent.button != 1:
+            return
+
         if event.artist and hasattr(event, "ind"):
             idx = event.ind[0]  # Index of point
             self.slider.setValue(idx)
 
     def on_hover(self, event):
+        if not self.scatter:
+            return
         vis = self.annot.get_visible()
         if event.inaxes == self.canvas.axes:
             cont, ind = self.scatter.contains(event)
             if cont:
                 idx = ind["ind"][0]
+                if (
+                    idx < 0
+                    or idx >= len(self.display_energies)
+                    or idx >= len(self.steps)
+                ):
+                    return
                 pos = self.scatter.get_offsets()[idx]
                 self.annot.xy = pos
                 val = self.display_energies[idx]
@@ -943,6 +1007,16 @@ class TrajectoryResultDialog(QDialog):
                 idx = 0
         self.slider.setValue(idx)
 
+    def go_to_first_frame(self):
+        if self.is_playing:
+            self.toggle_play()
+        self.slider.setValue(0)
+
+    def go_to_last_frame(self):
+        if self.is_playing:
+            self.toggle_play()
+        self.slider.setValue(len(self.steps) - 1)
+
     def save_graph(self):
         # Hide annotation before saving
         was_visible = self.annot.get_visible()
@@ -957,8 +1031,8 @@ class TrajectoryResultDialog(QDialog):
         )
         if path:
             self.canvas.fig.savefig(path, dpi=300)
-            if self.gl_widget and hasattr(self.gl_widget, "statusBar"):
-                self.gl_widget.statusBar().showMessage(
+            if self.context:
+                self.context.show_status_message(
                     f"Graph saved to: {os.path.basename(path)}", 5000
                 )
             else:
@@ -974,13 +1048,13 @@ class TrajectoryResultDialog(QDialog):
             try:
                 self._highlight_marker.remove()
             except Exception as _e:
-                logging.warning("[traj_analysis.py:828] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             del self._highlight_marker
         if getattr(self, "_highlight_line", None) is not None:
             try:
                 self._highlight_line.remove()
             except Exception as _e:
-                logging.warning("[traj_analysis.py:832] silenced: %s", _e)
+                logging.warning("silenced: %s", _e)
             del self._highlight_line
 
         self.lbl_info.setText("Selection Cleared")
@@ -1011,6 +1085,8 @@ class TrajectoryResultDialog(QDialog):
                     writer.writerow(header)
                     mode = "Relative" if self.show_relative else "Absolute"
                     for i, step in enumerate(self.steps):
+                        if i >= len(self.display_energies):
+                            break
                         row = [i + 1, self.display_energies[i], mode]
                         if has_coord:
                             cv = step.get("scan_coord")
@@ -1018,12 +1094,10 @@ class TrajectoryResultDialog(QDialog):
                                 cv = step.get("dist")
                             row.insert(1, cv if cv is not None else "")
                         writer.writerow(row)
-                if self.gl_widget and hasattr(self.gl_widget, "statusBar"):
-                    self.gl_widget.statusBar().showMessage(
+                if self.context:
+                    self.context.show_status_message(
                         f"Data saved to: {os.path.basename(path)}", 5000
                     )
-                else:
-                    pass
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
@@ -1151,12 +1225,10 @@ class TrajectoryResultDialog(QDialog):
                     loop=0,
                     disposal=2,
                 )
-                if self.gl_widget and hasattr(self.gl_widget, "statusBar"):
-                    self.gl_widget.statusBar().showMessage(
+                if self.context:
+                    self.context.show_status_message(
                         f"GIF saved to: {os.path.basename(path)}", 5000
                     )
-                else:
-                    pass
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save GIF:\n{e}")
