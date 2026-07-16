@@ -123,15 +123,18 @@ def main():
     else:
         platform_tag = "unknown"
 
-    # Read plugin version from __init__.py
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "_init", os.path.join(PKG_DIR, "__init__.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
+    # Read plugin version from __init__.py by parsing the text, NOT by importing
+    # it — __init__.py imports PyQt6, which is absent in the build environment
+    # (that made the zip name fall back to "unknown").
+    import re
+    version_tag = "unknown"
     try:
-        spec.loader.exec_module(mod)
-        version_tag = getattr(mod, "PLUGIN_VERSION", "unknown")
+        with open(os.path.join(PKG_DIR, "__init__.py"), encoding="utf-8") as fh:
+            m = re.search(
+                r'^\s*PLUGIN_VERSION\s*=\s*["\'](.+?)["\']', fh.read(), re.MULTILINE
+            )
+        if m:
+            version_tag = m.group(1)
     except Exception:
         version_tag = "unknown"
 
