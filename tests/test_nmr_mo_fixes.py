@@ -272,21 +272,44 @@ def _install_nmr_stubs():
             }
         )
 
-    # Always install these stubs (they don't conflict with a live Qt session)
-    _np = types.ModuleType("numpy")
-    _np.array = list
-    _np.zeros_like = lambda a: [0] * len(a)
+    # Numeric/plotting stubs are a *fallback only*. These go into the shared
+    # sys.modules for the rest of the session, so installing a crippled numpy
+    # (or a matplotlib whose Figure is a MagicMock) over a working one breaks
+    # every later test that does real numerics — including matplotlib itself,
+    # which consults sys.modules["numpy"] from its C extensions at call time.
+    # Prefer the genuine packages whenever they are importable.
+    try:
+        import numpy as _np  # noqa: F401
+    except ImportError:
+        _np = types.ModuleType("numpy")
+        _np.array = list
+        _np.zeros_like = lambda a: [0] * len(a)
 
-    _mpl = types.ModuleType("matplotlib")
-    _mpl.use = MagicMock()
-    _mpl_fig = types.ModuleType("matplotlib.figure")
-    _mpl_fig.Figure = MagicMock
-    _mpl_back = types.ModuleType("matplotlib.backends")
+    try:
+        import matplotlib as _mpl  # noqa: F401
+        from matplotlib import figure as _mpl_fig  # noqa: F401
+        from matplotlib import ticker as _mpl_tick  # noqa: F401
+    except ImportError:
+        _mpl = types.ModuleType("matplotlib")
+        _mpl.use = MagicMock()
+        _mpl_fig = types.ModuleType("matplotlib.figure")
+        _mpl_fig.Figure = MagicMock
+        _mpl_tick = types.ModuleType("matplotlib.ticker")
+        _mpl_tick.MaxNLocator = MagicMock
+
+    # The Qt-agg backend always stays stubbed: importing the real one needs a
+    # live Qt binding, which CI deliberately does not install. The *parent*
+    # backends package must stay real when it can, though — matplotlib imports
+    # backend_agg through it on demand (figure.tight_layout resolves a renderer
+    # that way), and a bare stub has no __path__ for that import to traverse.
+    try:
+        from matplotlib import backends as _mpl_back  # noqa: F401
+    except ImportError:
+        _mpl_back = types.ModuleType("matplotlib.backends")
+
     _mpl_back_qt = types.ModuleType("matplotlib.backends.backend_qtagg")
     _mpl_back_qt.FigureCanvasQTAgg = _Base
     _mpl_back_qt.NavigationToolbar2QT = MagicMock
-    _mpl_tick = types.ModuleType("matplotlib.ticker")
-    _mpl_tick.MaxNLocator = MagicMock
 
     _pv = types.ModuleType("pyvista")
     _pv.PolyData = MagicMock
@@ -296,11 +319,28 @@ def _install_nmr_stubs():
     _utils_mod.get_default_export_path = MagicMock(return_value="")
     _utils_mod.clear_atom_color_overrides = MagicMock()
 
+    def _save_json_atomic(path, data, indent=2):
+        import json as _json
+
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=indent)
+        os.replace(tmp, path)
+
+    _utils_mod.save_json_atomic = _save_json_atomic
+
     _custom_ref = types.ModuleType("orca_result_analyzer_rust.nmr_custom_ref_dialog")
     _custom_ref.CustomReferenceDialog = MagicMock
 
-    _ver_mod = types.ModuleType("orca_result_analyzer_rust")
-    _ver_mod.PLUGIN_VERSION = "2.6.0"
+    # nmr_analysis only needs PLUGIN_VERSION off the package. If the real
+    # package is already imported, annotate it rather than replacing it —
+    # overwriting the entry strips its submodule attributes (.gui and friends),
+    # which breaks any later test that patches "orca_result_analyzer_rust.gui.X".
+    _ver_mod = sys.modules.get("orca_result_analyzer_rust")
+    if _ver_mod is None:
+        _ver_mod = types.ModuleType("orca_result_analyzer_rust")
+    if not hasattr(_ver_mod, "PLUGIN_VERSION"):
+        _ver_mod.PLUGIN_VERSION = "2.6.0"
 
     sys.modules.update(
         {

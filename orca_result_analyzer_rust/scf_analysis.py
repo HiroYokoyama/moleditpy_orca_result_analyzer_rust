@@ -109,12 +109,18 @@ class SCFTraceDialog(QDialog):
 
         self.update_plot()
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         try:
             plt.close(self.figure)
         except Exception as _e:
             logging.warning("silenced: %s", _e)
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def update_plot(self):
         idx = self.combo_steps.currentData()

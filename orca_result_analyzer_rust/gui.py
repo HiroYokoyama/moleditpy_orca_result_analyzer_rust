@@ -762,11 +762,31 @@ class OrcaResultAnalyzerDialog(QDialog):
                         logging.warning("silenced: %s", _e)
                 setattr(self, attr, None)
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
-        """Ensure all sub-dialogs close when the main analyzer window is closed."""
+        """Ensure all sub-dialogs close when the main analyzer window is closed.
+
+        Accept the event directly instead of calling super().closeEvent():
+        QDialog.closeEvent invokes reject(), and reject() is routed back
+        through close() (so Esc runs this cleanup), which would recurse and
+        leave the window visible. event.accept() closes without re-entering.
+
+        Deregistering is part of the cleanup: picking is installed once in
+        __init__, so a window left in the registry gets re-shown by the
+        Extensions menu with its plotter event filter already removed, and
+        atom clicks stay dead for the rest of the session.
+        """
         self._disable_plotter_picking()
         self.close_all_sub_dialogs()
-        super().closeEvent(event)
+        if self.context is not None:
+            try:
+                self.context.register_window("analyzer", None)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Could not deregister analyzer window: %s", exc)
+        event.accept()
 
     def show_about(self):
         """Show About dialog."""
@@ -1240,7 +1260,9 @@ class OrcaResultAnalyzerDialog(QDialog):
             try:
                 self.conv_graph_dlg.close()
             except Exception:
-                logging.debug("Closing previous convergence graph failed", exc_info=True)
+                logging.debug(
+                    "Closing previous convergence graph failed", exc_info=True
+                )
         self.conv_graph_dlg = ConvergenceGraphDialog(self, scan_steps, current_idx)
         self.conv_graph_dlg.show()
 

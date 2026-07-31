@@ -1086,6 +1086,10 @@ class ForceViewerDialog(QDialog):
         self.actors = []
         mw.plotter.render()
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         """Clean up when dialog closes"""
         self.clear_vectors()
@@ -1096,9 +1100,9 @@ class ForceViewerDialog(QDialog):
             except Exception as _e:
                 logging.warning("silenced: %s", _e)
             self.graph_dlg = None
-        close_evt = getattr(super(), "closeEvent", None)
-        if close_evt is not None:
-            close_evt(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
@@ -1134,7 +1138,8 @@ class ForceViewerDialog(QDialog):
         all_settings["force_settings"] = force_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            from .utils import save_json_atomic
+
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving force settings: %s", e)

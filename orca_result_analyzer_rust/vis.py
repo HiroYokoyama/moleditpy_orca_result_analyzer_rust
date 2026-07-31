@@ -30,7 +30,8 @@ class CubeVisualizer:
 
         # Skip comments
         tokens = lines[2].split()
-        n_atoms = abs(int(tokens[0]))
+        n_atoms_raw = int(tokens[0])
+        n_atoms = abs(n_atoms_raw)
         origin = np.array([float(x) for x in tokens[1:4]])
 
         nx, *x_vec = lines[3].split()
@@ -47,8 +48,29 @@ class CubeVisualizer:
 
         # Data starts after atoms
         start_line = 6 + n_atoms
+        n_datasets = 1
+        if n_atoms_raw < 0:
+            # Negative atom count flags an MO cube (Gaussian convention):
+            # a DSET_IDS block (count + that many ids, possibly wrapped
+            # over several lines) sits between the atoms and the data.
+            n_ids = int(lines[start_line].split()[0])
+            n_datasets = max(1, n_ids)
+            consumed = len(lines[start_line].split()) - 1
+            start_line += 1
+            while consumed < n_ids:
+                consumed += len(lines[start_line].split())
+                start_line += 1
         full_str = " ".join(lines[start_line:])
-        data = np.fromstring(full_str, sep=" ")
+        data = np.array(full_str.split(), dtype=float)
+
+        # With several data sets the values are interleaved point by point, so
+        # the stream is n_datasets times too long. Reshaping it straight to
+        # (nx, ny, nz) raises; take the first set instead.
+        n_points = abs(nx) * abs(ny) * abs(nz)
+        if n_datasets > 1 and len(data) >= n_points * n_datasets:
+            # Orbital 0 sits at 0, m, 2m, ... A slice works on a plain list
+            # too, which is what the stubbed numpy in the tests returns.
+            data = data[0 : n_points * n_datasets : n_datasets]
 
         return {
             "dims": (abs(nx), abs(ny), abs(nz)),
@@ -76,10 +98,14 @@ class CubeVisualizer:
         gy = gy.flatten(order="F")
         gz = gz.flatten(order="F")
 
-        scale = BOHR_TO_ANG
+        # A negative voxel count on the NX line means the grid is already in
+        # Angstrom (Gaussian cube convention). Converting those as if they
+        # were Bohr inflated the whole isosurface by 1/0.529 = 1.89x. ORCA
+        # writes Bohr, so this only bit cubes from other programs.
+        scale = 1.0 if meta.get("is_angstrom") else BOHR_TO_ANG
 
         points = origin + np.outer(gx, xv) + np.outer(gy, yv) + np.outer(gz, zv)
-        points *= scale  # Convert Bohr -> Angstrom
+        points *= scale
 
         grid.points = points
         grid.dimensions = [nx, ny, nz]

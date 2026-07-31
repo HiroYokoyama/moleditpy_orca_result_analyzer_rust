@@ -31,7 +31,7 @@ import os
 import json
 import pyvista as pv
 from .spectrum_widget import SpectrumWidget
-from .utils import get_default_export_path
+from .utils import get_default_export_path, save_json_atomic
 import logging
 
 try:
@@ -439,14 +439,9 @@ class FreqSpectrumWindow(QWidget):
                 QMessageBox.warning(self, "Error", "Failed to export stick data.")
 
     def closeEvent(self, event):
-        # Notify parent that we are closing (optional, effectively done by parent checking .isVisible())
-        # Or we can nullify reference in parent?
-        if self.freq_dialog and hasattr(self.freq_dialog, "spectrum_win"):
-            # Don't nullify, just let it stay?
-            # Better to let parent know we can reopen.
-            # But parent just creates new one or shows existing?
-            # We'll just hide basically.
-            pass
+        # No cleanup of its own: the parent FrequencyDialog keeps the
+        # reference and reuses this window, checking visibility to decide
+        # whether to re-show it.
         super().closeEvent(event)
 
 
@@ -479,7 +474,7 @@ class FrequencyDialog(QDialog):
         self.spectrum_win = None
 
         self.setWindowTitle("Vibrational Frequencies")
-        self.resize(450, 650)
+        self.resize(570, 700)
 
         self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
         self.init_ui()
@@ -1315,6 +1310,10 @@ class FrequencyDialog(QDialog):
         self.vector_res = val
         self.update_view()
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         if self.chk_manual_displ.isChecked():
             self.is_playing = False
@@ -1423,7 +1422,6 @@ class FrequencyDialog(QDialog):
         all_settings["freq_settings"] = freq_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving freq settings: %s", e)

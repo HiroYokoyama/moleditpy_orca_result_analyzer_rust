@@ -149,7 +149,9 @@ def _vdw(sym):
         try:
             return _PERIODIC_TABLE.GetRvdw(sym)
         except Exception:
-            logging.debug("vdW radius lookup failed for '%s'; using default", sym, exc_info=True)
+            logging.debug(
+                "vdW radius lookup failed for '%s'; using default", sym, exc_info=True
+            )
     return 1.70
 
 
@@ -382,6 +384,12 @@ class BondAnalysisDialog(QDialog):
                         lines.append(f"  {h['atom_sym']} {h['atom_idx']}:  {h['raw']}")
         QMessageBox.information(self, f"NBO #{o['index']} detail", "\n".join(lines))
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         self._clear_highlight()
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import json
@@ -25,7 +26,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 import pyvista as pv
 import numpy as np
-from .utils import get_default_export_path
+from .utils import get_default_export_path, save_json_atomic
 
 try:
     import nmrsim
@@ -54,6 +55,49 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from .nmr_custom_ref_dialog import CustomReferenceDialog
 from . import PLUGIN_VERSION
+
+# Built-in shielding references, shared by __init__ and save_settings (which
+# subtracts them to work out which entries the user added). They were once
+# duplicated verbatim in both places, so editing one silently reclassified a
+# built-in as a custom reference.
+#
+# Shifts are δ = δ_ref + (σ_ref − σ_sample), so for one nucleus every entry
+# must satisfy the same δ_ref + σ_ref: that sum IS the absolute shielding of
+# the δ=0 point, and the alternative reference compounds are just different
+# parameterizations of it. The values below are anchored on TMS (1H, 13C) and
+# CH3NO2 (15N) and made exactly consistent with it.
+#
+# These are absolute shieldings and therefore method-dependent. They are
+# reasonable for a common GIAO/DFT setup, but for quantitative work compute
+# the reference at the same level of theory as the sample and enter it
+# through "Custom".
+DEFAULT_REFERENCE_STANDARDS = {
+    "1H": {
+        "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
+        "TMS": {"delta_ref": 0.0, "sigma_ref": 31.80},
+        "CDCl3": {"delta_ref": 7.26, "sigma_ref": 24.54},
+        "DMSO-d6": {"delta_ref": 2.50, "sigma_ref": 29.30},
+    },
+    "13C": {
+        "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
+        "TMS": {"delta_ref": 0.0, "sigma_ref": 182.40},
+        "CDCl3": {"delta_ref": 77.16, "sigma_ref": 105.24},
+        "DMSO-d6": {"delta_ref": 39.52, "sigma_ref": 142.88},
+    },
+    "15N": {
+        "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
+        "CH3NO2": {"delta_ref": 0.0, "sigma_ref": -135.80},
+        "NH3": {"delta_ref": -381.90, "sigma_ref": 246.10},
+    },
+    "31P": {
+        "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
+        "H3PO4 (85%)": {"delta_ref": 0.0, "sigma_ref": 328.40},
+    },
+    "19F": {
+        "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
+        "CFCl3": {"delta_ref": 0.0, "sigma_ref": 188.50},
+    },
+}
 
 
 class NMRDialog(QDialog):
@@ -242,39 +286,11 @@ class NMRDialog(QDialog):
 
         self.last_ref_name = None
 
-        # Reference standards database (delta = reference position, sigma = isotropic shielding)
-        # Chemical shift formula: δ_sample = δ_ref + (σ_ref - σ_sample)
+        # Reference standards (delta = reference position, sigma = isotropic
+        # shielding). Chemical shift: δ_sample = δ_ref + (σ_ref - σ_sample)
         self.reference_standards = {
-            "1H": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "TMS": {"delta_ref": 0.0, "sigma_ref": 31.8},
-                "CDCl3": {"delta_ref": 7.26, "sigma_ref": 24.5},
-                "DMSO-d6": {"delta_ref": 2.50, "sigma_ref": 29.3},
-                "Custom": {"delta_ref": 0.0, "sigma_ref": 0.0},
-            },
-            "13C": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "TMS": {"delta_ref": 0.0, "sigma_ref": 182.4},
-                "CDCl3": {"delta_ref": 77.16, "sigma_ref": 105.2},
-                "DMSO-d6": {"delta_ref": 39.52, "sigma_ref": 142.9},
-                "Custom": {"delta_ref": 0.0, "sigma_ref": 0.0},
-            },
-            "15N": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "CH3NO2": {"delta_ref": 0.0, "sigma_ref": -135.8},
-                "NH3": {"delta_ref": -381.9, "sigma_ref": 244.4},
-                "Custom": {"delta_ref": 0.0, "sigma_ref": 0.0},
-            },
-            "31P": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "H3PO4 (85%)": {"delta_ref": 0.0, "sigma_ref": 328.4},
-                "Custom": {"delta_ref": 0.0, "sigma_ref": 0.0},
-            },
-            "19F": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "CFCl3": {"delta_ref": 0.0, "sigma_ref": 188.5},
-                "Custom": {"delta_ref": 0.0, "sigma_ref": 0.0},
-            },
+            nucleus: dict(refs, Custom={"delta_ref": 0.0, "sigma_ref": 0.0})
+            for nucleus, refs in DEFAULT_REFERENCE_STANDARDS.items()
         }
 
         # Current reference values
@@ -287,17 +303,7 @@ class NMRDialog(QDialog):
 
         # Settings file
         self.file_path = file_path
-        if file_path:
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            file_dir = os.path.dirname(file_path)
-            self.merged_peaks_file = os.path.join(
-                file_dir, f"{base_name}-nmr_peak_info.json"
-            )
-        else:
-            # Fallback if no file path provided
-            self.merged_peaks_file = os.path.join(
-                os.path.dirname(__file__), "nmr_merged_peaks.json"
-            )
+        self.merged_peaks_file = self._merged_peaks_path(file_path, data)
 
         self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -320,6 +326,32 @@ class NMRDialog(QDialog):
         # Custom 3D highlight actors and names
         self._nmr_sphere_actors = []
         self._nmr_label_names = []  # Explicitly track label names for removal
+
+    @staticmethod
+    def _merged_peaks_path(file_path, data):
+        """Path of the merged-peaks JSON for this result.
+
+        Without a file path the old code used one shared fallback file, so
+        merges saved for one molecule silently applied to (and were
+        overwritten by) every other pathless result. Key the fallback by a
+        fingerprint of the shielding data instead.
+        """
+        if file_path:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            return os.path.join(
+                os.path.dirname(file_path), f"{base_name}-nmr_peak_info.json"
+            )
+        payload = json.dumps(
+            [
+                [d.get("atom_idx"), d.get("atom_sym"), d.get("shielding")]
+                for d in (data or [])
+            ],
+            sort_keys=True,
+        )
+        fingerprint = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+        return os.path.join(
+            os.path.dirname(__file__), f"nmr_merged_peaks-{fingerprint}.json"
+        )
 
     def _check_external_selection(self):
         """Poll main window for 3D selection changes"""
@@ -412,6 +444,24 @@ class NMRDialog(QDialog):
                 new_selection.add(peak_idx)
         return new_selection
 
+    def _remap_selection_to_new_peaks(self, old_metadata):
+        """Re-derive selected_peak_indices after peaks_metadata is rebuilt.
+
+        The selection stores positions into peaks_metadata; a rebuild
+        (nucleus filter, reference change, merge/unmerge) reorders that
+        list, so the same numbers would silently point at different peaks
+        — and a later Merge/Unmerge would then destroy the wrong groups.
+        """
+        if not self.selected_peak_indices:
+            return
+        selected_atoms = set()
+        for idx in self.selected_peak_indices:
+            if isinstance(idx, int) and 0 <= idx < len(old_metadata):
+                selected_atoms.update(old_metadata[idx][3])
+        self.selected_peak_indices = self._calculate_peak_selection_from_atoms(
+            selected_atoms
+        )
+
     def select_peaks_by_atom_indices(self, atom_indices):
         """Deprecated/Legacy: Now uses _check_external_selection logic directly"""
         # Kept for potential internal calls, but redirected to robust logic
@@ -497,6 +547,18 @@ class NMRDialog(QDialog):
         # 3. 重複排除とソート
         selected_indices = sorted(list(set(selected_indices)))
 
+        # Stale peak metadata can resolve the selection to zero atoms;
+        # merging then would store an empty group (and a stale selection
+        # must never reach the conflict-replace step below).
+        if not selected_indices:
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Could not resolve the selected peaks to atoms. "
+                "Please re-select the peaks and try again.",
+            )
+            return
+
         # 4. 既存のマージグループとの競合チェック
         new_merged_peaks = []
         conflict_found = False
@@ -536,10 +598,11 @@ class NMRDialog(QDialog):
         if not self.selected_peak_indices:
             return
 
+        metadata = getattr(self, "peaks_metadata", None) or []
         groups_to_remove = []
         for peak_idx in self.selected_peak_indices:
-            if peak_idx < len(self.peaks_metadata):
-                _, _, is_merged, atom_indices = self.peaks_metadata[peak_idx]
+            if peak_idx < len(metadata):
+                _, _, is_merged, atom_indices = metadata[peak_idx]
                 if is_merged:
                     # Find which group in self.merged_peaks contains these indices
                     # Since groups are unique per atom, we can just match any index
@@ -581,22 +644,42 @@ class NMRDialog(QDialog):
     def save_merged_peaks(self):
         """Save merged peaks to JSON file"""
         try:
-            with open(self.merged_peaks_file, "w", encoding="utf-8") as f:
-                json.dump(self.merged_peaks, f, indent=2)
+            save_json_atomic(self.merged_peaks_file, self.merged_peaks)
         except Exception as e:
             logging.warning("Error saving merged peaks: %s", e)
 
     def load_merged_peaks(self):
         """Load merged peaks from JSON file"""
-        if os.path.exists(self.merged_peaks_file):
+        self.merged_peaks = []
+        if not os.path.exists(self.merged_peaks_file):
+            return
+        try:
+            with open(self.merged_peaks_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            logging.warning("Error loading merged peaks: %s", e)
+            # Move the unreadable file aside instead of leaving it in the
+            # save path: the next save would otherwise silently replace
+            # every previously saved merge with the empty list.
             try:
-                with open(self.merged_peaks_file, "r", encoding="utf-8") as f:
-                    self.merged_peaks = json.load(f)
-            except Exception as e:
-                logging.warning("Error loading merged peaks: %s", e)
-                self.merged_peaks = []
-        else:
-            self.merged_peaks = []
+                os.replace(self.merged_peaks_file, self.merged_peaks_file + ".corrupt")
+            except OSError:
+                pass
+            return
+        if not isinstance(raw, list):
+            logging.warning(
+                "Ignoring merged peaks file with unexpected structure: %s",
+                self.merged_peaks_file,
+            )
+            return
+        for group in raw:
+            indices = group.get("indices") if isinstance(group, dict) else None
+            if (
+                isinstance(indices, list)
+                and indices
+                and all(isinstance(i, int) and not isinstance(i, bool) for i in indices)
+            ):
+                self.merged_peaks.append(group)
 
     def save_settings(self):
         """Save NMR settings to JSON"""
@@ -610,34 +693,7 @@ class NMRDialog(QDialog):
                 logging.warning("silenced: %s", _e)
 
         # Extract custom references only (non-default)
-        # Extract custom references only (non-default)
-        default_standards = {
-            "1H": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "TMS": {"delta_ref": 0.0, "sigma_ref": 31.8},
-                "CDCl3": {"delta_ref": 7.26, "sigma_ref": 24.5},
-                "DMSO-d6": {"delta_ref": 2.50, "sigma_ref": 29.3},
-            },
-            "13C": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "TMS": {"delta_ref": 0.0, "sigma_ref": 182.4},
-                "CDCl3": {"delta_ref": 77.16, "sigma_ref": 105.2},
-                "DMSO-d6": {"delta_ref": 39.52, "sigma_ref": 142.9},
-            },
-            "15N": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "CH3NO2": {"delta_ref": 0.0, "sigma_ref": -135.8},
-                "NH3": {"delta_ref": -381.9, "sigma_ref": 244.4},
-            },
-            "31P": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "H3PO4 (85%)": {"delta_ref": 0.0, "sigma_ref": 328.4},
-            },
-            "19F": {
-                "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
-                "CFCl3": {"delta_ref": 0.0, "sigma_ref": 188.5},
-            },
-        }
+        default_standards = DEFAULT_REFERENCE_STANDARDS
 
         custom_refs = {}
         for nucleus, refs in self.reference_standards.items():
@@ -667,8 +723,7 @@ class NMRDialog(QDialog):
         all_settings["nmr_settings"] = current_nmr_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving NMR settings: %s", e)
 
@@ -744,6 +799,12 @@ class NMRDialog(QDialog):
         self.combo_ref.setMinimumWidth(250)
         self.combo_ref.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.combo_ref.setToolTip(
+            "Built-in σ_ref values are absolute shieldings and therefore depend "
+            "on the functional and basis set.\nFor quantitative shifts, compute "
+            "the reference at the same level of theory as this job and enter it "
+            "under “Custom”."
         )
         self.combo_ref.currentIndexChanged.connect(self.on_ref_change)
         ref_sel_row.addWidget(self.combo_ref)
@@ -1381,7 +1442,10 @@ class NMRDialog(QDialog):
         key = self.get_nucleus_key(nucleus)
         # Try key, then generic element (e.g. "Pt" if "195Pt" not in defaults), then fallback
 
-        element_only = re.sub(r"[^A-Z]", "", key)
+        # Keep both cases: stripping lowercase would reduce a two-letter symbol
+        # to its first letter, so "195Pt" became "P" and platinum silently
+        # inherited phosphorus's window.
+        element_only = re.sub(r"[^A-Za-z]", "", key)
 
         range_vals = defaults.get(key, defaults.get(element_only, (500, -500)))
 
@@ -1575,7 +1639,9 @@ class NMRDialog(QDialog):
             return
 
         # 共通ロジックからピークを取得
+        old_metadata = getattr(self, "peaks_metadata", None) or []
         self.peaks_metadata = self._get_current_peaks()
+        self._remap_selection_to_new_peaks(old_metadata)
 
         if not self.peaks_metadata:
             ax.text(
@@ -2280,7 +2346,9 @@ class NMRDialog(QDialog):
             return
 
         # 2. クラス変数にも保存（クリック判定やハイライト用）
+        old_metadata = getattr(self, "peaks_metadata", None) or []
         self.peaks_metadata = peaks_to_simulate
+        self._remap_selection_to_new_peaks(old_metadata)
         self.current_shifts = [p[0] for p in peaks_to_simulate]
 
         # 3. 核種シンボルの定義
@@ -2378,9 +2446,12 @@ class NMRDialog(QDialog):
 
                 for pid, j_list in partner_j_values.items():
                     n_partner = partner_multiplicity[pid]
-                    n_current = len(atom_indices)
-                    total_connections = n_current * n_partner
-                    avg_J = sum(j_list) / total_connections
+                    # Average over the couplings ORCA actually printed, not
+                    # over the theoretical pair count: it commonly reports a
+                    # subset (nucleus selection, symmetry-unique pairs), and
+                    # dividing by the full count scaled J down towards zero
+                    # and collapsed the multiplet.
+                    avg_J = sum(j_list) / len(j_list)
                     if avg_J > 0.1:
                         couplings_list.append((avg_J, n_partner))
 
@@ -2679,6 +2750,12 @@ class NMRDialog(QDialog):
         self._last_synced_mw_selection = frozenset()
         self.sel_timer.start(200)
 
+    def reject(self):
+        """Esc hides a QDialog without closeEvent — route it through
+        close() so the unsaved-merge prompt fires and sel_timer stops
+        instead of polling a hidden dialog forever."""
+        self.close()
+
     def closeEvent(self, event):
         """Clean up labels and stop polling timer when dialog closes"""
         # Stop the polling timer first so it cannot fire on a dead widget
@@ -2698,7 +2775,9 @@ class NMRDialog(QDialog):
 
         self.save_settings()
         self.clear_atom_labels()
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def keyPressEvent(self, event):
         """Intercept Enter/Return keys to prevent dialog reset or closure"""

@@ -95,6 +95,23 @@ class CubeWriter:
                 f.write("\n")
 
 
+#: Shell letters ORCA can print, indexed by angular momentum.
+SHELL_LETTERS = "SPDFGHIK"
+
+#: Highest angular momentum the Rust engine has definitions for (G).
+MAX_SUPPORTED_L = 4
+
+
+class UnsupportedBasisError(ValueError):
+    """The basis set uses shells this engine cannot evaluate exactly.
+
+    Mirrors the pure-Python plugin's class of the same name so the shared
+    mo_analysis.py catches it identically. The Rust constructor enforces the
+    same rule, but checking here keeps the exception type and the
+    user-facing message in parity with the Python engine.
+    """
+
+
 class BasisSetEngine:
     """
     GTO-based Basis Set evaluator backed by the Rust extension.
@@ -106,6 +123,24 @@ class BasisSetEngine:
         shells: list of dicts — each:
           {'type': int, 'center': [x,y,z] Bohr, 'exps': array, 'coeffs': array}
         """
+        for sh in shells:
+            l_type = int(sh["type"])
+            if not 0 <= l_type <= MAX_SUPPORTED_L:
+                # Skipping such a shell would leave every later shell reading
+                # the wrong slice of the MO coefficient vector — a silently
+                # wrong orbital with nothing on screen to say so.
+                letter = (
+                    SHELL_LETTERS[l_type]
+                    if 0 <= l_type < len(SHELL_LETTERS)
+                    else f"l={l_type}"
+                )
+                raise UnsupportedBasisError(
+                    f"This basis set contains {letter} shells, which the "
+                    "orbital renderer does not support (S through G only)."
+                    "\n\nVisualization is blocked rather than showing an "
+                    "orbital that would be silently incorrect."
+                )
+
         rust_shells = [
             {
                 "type": int(sh["type"]),

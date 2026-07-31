@@ -29,20 +29,24 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush
 import json
-from .utils import get_default_export_path
+from .utils import get_default_export_path, save_json_atomic
 import logging
 
 try:
-    from .mo_engine import BasisSetEngine, CalcWorker
+    from .mo_engine import BasisSetEngine, CalcWorker, UnsupportedBasisError
     from .vis import CubeVisualizer
 except ImportError:
     try:
-        from mo_engine import BasisSetEngine, CalcWorker
+        from mo_engine import BasisSetEngine, CalcWorker, UnsupportedBasisError
         from vis import CubeVisualizer
     except Exception:
         BasisSetEngine = None
         CalcWorker = None
         CubeVisualizer = None
+
+        class UnsupportedBasisError(ValueError):
+            """Stand-in so the except clause stays valid without the engine."""
+
 
 try:
     from .energy_diag import EnergyDiagramDialog
@@ -349,14 +353,22 @@ class MODialog(QDialog):
                 s = "restricted"  # fallback using restricted logic for unknown strings if any
             spin_mos[s].append(mo)
 
+        # HOMO = the highest-indexed occupied orbital, not the occupied
+        # *count* - 1: fractional-occupation output (FOD, natural orbitals)
+        # leaves gaps, and counting labelled a mid-manifold orbital HOMO.
         spin_homo_idx = {}
         for s in spin_mos:
-            n_occ = 0
-            for mo in spin_mos[s]:
-                occ = mo.get("occ", mo.get("occupation", 0.0))
-                if occ > 0.1:
-                    n_occ += 1
-            spin_homo_idx[s] = n_occ - 1
+            occupied = []
+            for i, mo in enumerate(spin_mos[s]):
+                if mo.get("occ", mo.get("occupation", 0.0)) <= 0.1:
+                    continue
+                try:
+                    # "id" may arrive as the string dict key; the display path
+                    # below parses it the same way.
+                    occupied.append(int(mo.get("id", mo.get("index", i))))
+                except (TypeError, ValueError):
+                    occupied.append(i)
+            spin_homo_idx[s] = max(occupied) if occupied else -1
 
         # Display order: Reversed (High Energy Top)
         # We need to sort global list carefully if mixing spins?
@@ -583,6 +595,11 @@ class MODialog(QDialog):
                 clean_shells.append(d)
 
             return BasisSetEngine(clean_shells)
+        except UnsupportedBasisError as e:
+            # Written for the user; show it as-is rather than wrapped in
+            # "Engine Init Failed".
+            QMessageBox.warning(self, "Unsupported basis set", str(e))
+            return None
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Engine Init Failed: {e}")
             return None
@@ -698,9 +715,26 @@ class MODialog(QDialog):
 
         # Prepare Data
         raw_coeffs = [x["coeff"] for x in mo_data_coeffs["coeffs"]]
-        dense_vec = np.zeros(engine.n_basis)
-        n = min(len(raw_coeffs), engine.n_basis)
-        dense_vec[:n] = raw_coeffs[:n]
+
+        # ORCA prints one coefficient per basis function, so a mismatch means
+        # the basis set we rebuilt is not the one the coefficients belong to
+        # -- typically a shell the parser did not recognise. min()-truncating
+        # the vector used to hide that: after a dropped shell every remaining
+        # coefficient lines up with the wrong basis function and the orbital
+        # is quietly wrong.
+        if len(raw_coeffs) != engine.n_basis:
+            QMessageBox.warning(
+                self,
+                "Basis set mismatch",
+                f"This job has {len(raw_coeffs)} MO coefficients per orbital "
+                f"but the reconstructed basis set has {engine.n_basis} "
+                "functions.\n\nVisualization is blocked rather than showing "
+                "an orbital that would be silently incorrect.",
+            )
+            self.process_generation_queue()
+            return
+
+        dense_vec = np.array(raw_coeffs, dtype=float)
 
         if np.sum(np.abs(dense_vec)) < 1e-9:
             QMessageBox.warning(
@@ -903,8 +937,7 @@ class MODialog(QDialog):
         all_settings["mo_settings"] = mo_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving settings: %s", e)
 
@@ -1047,6 +1080,10 @@ class MODialog(QDialog):
             mw.plotter.render()
             self.last_cube_path = path
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         """Clean up 3D actors when closing"""
         # Clean up tracked sub-dialogs
@@ -1068,7 +1105,9 @@ class MODialog(QDialog):
             plotter.remove_actor("mo_iso_n")
             plotter.render()
 
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def export_csv(self):
         default_path = get_default_export_path(
@@ -1083,7 +1122,9 @@ class MODialog(QDialog):
         try:
             with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["ID", "Occupation", "Energy (eV)", "Energy (Eh)"])
+                writer.writerow(
+                    ["MO", "Label", "Occupation", "Energy (eV)", "Energy (Eh)"]
+                )
 
                 # Iterate tree items to respect current sort/display?
                 # Using the data list is safer and complete.
@@ -1094,8 +1135,10 @@ class MODialog(QDialog):
                 it = QTreeWidgetItemIterator(self.tree)
                 while it.value():
                     item = it.value()
-                    # ID, Occ, eV, Eh
-                    row = [item.text(0), item.text(1), item.text(2), item.text(3)]
+                    # Must cover every tree column (MO, Label, Occ, eV, Eh):
+                    # stopping at text(3) shifted each value one header to the
+                    # left and dropped the Hartree energy entirely.
+                    row = [item.text(c) for c in range(5)]
                     writer.writerow(row)
                     it += 1
             # QMessageBox.information(self, "Success", f"Data exported to {filename}")

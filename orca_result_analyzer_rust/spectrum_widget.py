@@ -125,16 +125,21 @@ class SpectrumWidget(QWidget):
         self.sigma = val
         self.plot_spectrum()
 
+    @staticmethod
+    def _checked(state):
+        """Accept either a Qt check state or a plain bool."""
+        return bool(state) and state != Qt.CheckState.Unchecked.value
+
     def set_sticks(self, state):
-        self.show_sticks = state == Qt.CheckState.Checked.value or state
+        self.show_sticks = self._checked(state)
         self.plot_spectrum()
 
     def set_gaussian(self, state):
-        self.show_gaussian = state == Qt.CheckState.Checked.value or state
+        self.show_gaussian = self._checked(state)
         self.plot_spectrum()
 
     def set_markers(self, state):
-        self.show_markers = state == Qt.CheckState.Checked.value or state
+        self.show_markers = self._checked(state)
         self.plot_spectrum()
 
     def save_png(self, path):
@@ -205,11 +210,13 @@ class SpectrumWidget(QWidget):
         scaling = getattr(self, "scaling_factor", 1.0)
         curve_y *= scaling
 
-        # Clean up very small values (avoid E-555 etc)
-        # We set values smaller than 1e-15 * max_intensity to zero
-        max_val = np.max(curve_y) if len(curve_y) > 0 else 0
+        # Clean up denormal-sized values (avoid E-555 etc) by MAGNITUDE.
+        # Comparing the signed value against a positive threshold zeroed every
+        # negative point, which silently flattened the negative Cotton effects
+        # out of an exported CD spectrum (the on-screen plot was unaffected).
+        max_val = np.max(np.abs(curve_y)) if len(curve_y) > 0 else 0
         threshold = max(1e-12, max_val * 1e-15)
-        curve_y[curve_y < threshold] = 0.0
+        curve_y[np.abs(curve_y) < threshold] = 0.0
 
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:

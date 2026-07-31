@@ -11,42 +11,41 @@ use pyo3::types::{PyDict, PyList};
 use regex::Regex;
 use std::collections::HashMap;
 
+/// 1 atomic unit of electric dipole moment (e*a0) in Debye.
+const AU_TO_DEBYE: f64 = 2.541746473;
+
+/// Modes below this magnitude are translations/rotations or numerical noise,
+/// not genuine imaginary frequencies (cm^-1). Counting them reported a
+/// transition state for a perfectly good minimum.
+const IMAGINARY_FREQ_THRESHOLD: f64 = 10.0;
+
 // ---------------------------------------------------------------------------
 // Compiled regex cache (compiled once, reused for every call)
 // ---------------------------------------------------------------------------
 
 static RE_FLOAT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+\.?").unwrap());
-static RE_ENERGY_LABEL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:Energy|E)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)").unwrap()
-});
+static RE_ENERGY_LABEL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:Energy|E)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)").unwrap());
 static RE_DIST_LABEL: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)")
         .unwrap()
 });
-static RE_STATE_HEADER: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)STATE\s+(\d+)\s*:").unwrap());
-static RE_ENERGY_EV: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*eV").unwrap());
-static RE_ENERGY_CM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*cm").unwrap());
-static RE_ENERGY_NM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*nm").unwrap());
-static RE_TARGET_STATE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(\d+)").unwrap());
+static RE_STATE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)STATE\s+(\d+)\s*:").unwrap());
+static RE_ENERGY_EV: Lazy<Regex> = Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*eV").unwrap());
+static RE_ENERGY_CM: Lazy<Regex> = Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*cm").unwrap());
+static RE_ENERGY_NM: Lazy<Regex> = Lazy::new(|| Regex::new(r"([-+]?\d*\.\d+)\s*nm").unwrap());
+static RE_TARGET_STATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+)").unwrap());
 static RE_CYCLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)CYCLE\s+(\d+)").unwrap());
 static RE_SCAN_STEP: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)STEP\s+(\d+)").unwrap());
 static RE_TEMP: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+\.\d+)\s*K").unwrap());
-static RE_MERGED_ATOM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(\d+)([A-Za-z]+)$").unwrap());
-static RE_NEB_TRJ: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)Current trajectory will be written to\s*\.+\s*(.+)").unwrap()
-});
+static RE_MERGED_ATOM: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+)([A-Za-z]+)$").unwrap());
+static RE_NEB_TRJ: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)Current trajectory will be written to\s*\.+\s*(.+)").unwrap());
 static RE_MAX_STATS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(Max\([^)]+\))\s+([-\d\.]+)").unwrap());
-static RE_FLOATS_IN_LINE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?").unwrap()
-});
+static RE_FLOATS_IN_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?").unwrap());
 
 // ---------------------------------------------------------------------------
 // Tiny helpers
@@ -54,6 +53,41 @@ static RE_FLOATS_IN_LINE: Lazy<Regex> = Lazy::new(|| {
 
 fn parse_f64(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok()
+}
+
+/// Index of the first column named in `wanted` within an IR/Raman header.
+///
+/// ORCA's header token positions line up with the data rows only once inline
+/// unit tokens are dropped: the Raman header reads
+/// "Mode freq (cm**-1) Activity Depolarization" while its rows carry no unit
+/// column, so counting "(cm**-1)" shifts every lookup one place right —
+/// Raman activity would be read from the depolarization column, and ORCA 4's
+/// "Mode freq (cm**-1) T**2 ..." IR header would resolve to TX.
+fn find_intensity_column(
+    lines: &[&str],
+    section_start: usize,
+    wanted: &[&str],
+    default: usize,
+) -> usize {
+    let start = (section_start + 1).min(lines.len());
+    let end = (section_start + 6).min(lines.len());
+    for line in &lines[start..end] {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.is_empty() || !tokens[0].eq_ignore_ascii_case("mode") {
+            continue;
+        }
+        let lowered: Vec<String> = tokens
+            .iter()
+            .filter(|tok| !tok.starts_with('('))
+            .map(|tok| tok.to_lowercase().trim_matches(':').to_string())
+            .collect();
+        for name in wanted {
+            if let Some(pos) = lowered.iter().position(|c| c == name) {
+                return pos;
+            }
+        }
+    }
+    default
 }
 
 fn parse_i32(s: &str) -> Option<i32> {
@@ -159,10 +193,12 @@ struct ChargeEntry {
 
 #[derive(Default, Clone)]
 struct Dipole {
+    /// Components as ORCA prints them: atomic units (e*a0).
     x: f64,
     y: f64,
     z: f64,
-    magnitude: f64,
+    magnitude_au: f64,
+    magnitude_debye: f64,
 }
 
 #[derive(Default, Clone)]
@@ -325,12 +361,20 @@ impl<'a> OrcaRustParser<'a> {
                 }
             }
             if uu.contains("TOTAL CHARGE") {
-                if let Some(v) = stripped.split_whitespace().last().and_then(|s| parse_i32(s)) {
+                if let Some(v) = stripped
+                    .split_whitespace()
+                    .last()
+                    .and_then(|s| parse_i32(s))
+                {
                     data.charge = v;
                 }
             }
             if uu.contains("MULTIPLICITY") {
-                if let Some(v) = stripped.split_whitespace().last().and_then(|s| parse_i32(s)) {
+                if let Some(v) = stripped
+                    .split_whitespace()
+                    .last()
+                    .and_then(|s| parse_i32(s))
+                {
                     data.mult = v;
                 }
             }
@@ -350,8 +394,7 @@ impl<'a> OrcaRustParser<'a> {
                 if let Some(cap) = RE_NEB_TRJ.captures(line) {
                     data.neb_trj_file = Some(cap[1].trim().to_string());
                 } else {
-                    data.neb_trj_file =
-                        stripped.split_whitespace().last().map(|s| s.to_string());
+                    data.neb_trj_file = stripped.split_whitespace().last().map(|s| s.to_string());
                 }
             }
             if uu.contains("CARTESIAN COORDINATES (ANGSTROEM)") {
@@ -629,16 +672,31 @@ impl<'a> OrcaRustParser<'a> {
                         coord_val = raw.split_whitespace().last().and_then(parse_f64);
                     }
                     if uu.contains("FINAL SINGLE POINT ENERGY") {
-                        en = raw.split_whitespace().last().and_then(parse_f64).unwrap_or(en);
-                    } else if uu.contains("TOTAL ENERGY") && raw.contains(':') && uu.contains("EH") {
+                        en = raw
+                            .split_whitespace()
+                            .last()
+                            .and_then(parse_f64)
+                            .unwrap_or(en);
+                    } else if uu.contains("TOTAL ENERGY") && raw.contains(':') && uu.contains("EH")
+                    {
                         if let Some(part) = raw.split(':').nth(1) {
-                            en = part.split_whitespace().next().and_then(parse_f64).unwrap_or(en);
+                            en = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(parse_f64)
+                                .unwrap_or(en);
                         }
                     } else if uu.contains("CURRENT ENERGY") && raw.contains("....") {
                         if let Some(part) = raw.split("....").nth(1) {
-                            en = part.split_whitespace().next().and_then(parse_f64).unwrap_or(en);
+                            en = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(parse_f64)
+                                .unwrap_or(en);
                         }
-                    } else if uu.contains("GEOMETRY CONVERGENCE") || uu.contains("CONVERGENCE CRITERIA") {
+                    } else if uu.contains("GEOMETRY CONVERGENCE")
+                        || uu.contains("CONVERGENCE CRITERIA")
+                    {
                         conv_info = self.parse_conv_info(k + 1, next_marker);
                     }
                 }
@@ -692,16 +750,31 @@ impl<'a> OrcaRustParser<'a> {
                     let uu = self.upper(k);
                     let raw = self.get(k);
                     if uu.contains("FINAL SINGLE POINT ENERGY") {
-                        en = raw.split_whitespace().last().and_then(parse_f64).unwrap_or(en);
-                    } else if uu.contains("TOTAL ENERGY") && raw.contains(':') && uu.contains("EH") {
+                        en = raw
+                            .split_whitespace()
+                            .last()
+                            .and_then(parse_f64)
+                            .unwrap_or(en);
+                    } else if uu.contains("TOTAL ENERGY") && raw.contains(':') && uu.contains("EH")
+                    {
                         if let Some(part) = raw.split(':').nth(1) {
-                            en = part.split_whitespace().next().and_then(parse_f64).unwrap_or(en);
+                            en = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(parse_f64)
+                                .unwrap_or(en);
                         }
                     } else if uu.contains("CURRENT ENERGY") && raw.contains("....") {
                         if let Some(part) = raw.split("....").nth(1) {
-                            en = part.split_whitespace().next().and_then(parse_f64).unwrap_or(en);
+                            en = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(parse_f64)
+                                .unwrap_or(en);
                         }
-                    } else if uu.contains("GEOMETRY CONVERGENCE") || uu.contains("CONVERGENCE CRITERIA") {
+                    } else if uu.contains("GEOMETRY CONVERGENCE")
+                        || uu.contains("CONVERGENCE CRITERIA")
+                    {
                         conv_info = self.parse_conv_info(k + 1, next_marker);
                     }
                 }
@@ -734,7 +807,8 @@ impl<'a> OrcaRustParser<'a> {
 
         // Append "opt_final" step from FINAL ENERGY EVALUATION AT THE STATIONARY POINT
         let final_eval_idx = self.lines.iter().position(|l| {
-            l.to_uppercase().contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
+            l.to_uppercase()
+                .contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
         });
         if let Some(i) = final_eval_idx {
             let mut final_en = 0.0_f64;
@@ -749,13 +823,14 @@ impl<'a> OrcaRustParser<'a> {
             }
             let (f_atoms, f_coords, f_found) = self.read_coords_from(i);
             if f_found {
-                let last_cycle = data.scan_steps.iter()
+                let last_cycle = data
+                    .scan_steps
+                    .iter()
                     .filter(|s| s.step_type == "opt_cycle")
                     .map(|s| s.step)
                     .max()
                     .unwrap_or(0);
-                let current_scan_step = data.scan_steps.last()
-                    .and_then(|s| s.scan_step_id);
+                let current_scan_step = data.scan_steps.last().and_then(|s| s.scan_step_id);
                 data.scan_steps.push(ScanStep {
                     step_type: "opt_final".to_string(),
                     scan_step_id: current_scan_step,
@@ -831,6 +906,7 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
         if let Some(is) = ir_start {
+            let ir_col = find_intensity_column(&self.lines, is, &["int", "t**2"], 3);
             let mut curr = is + 5;
             while curr < self.len() {
                 let line = self.get(curr).trim();
@@ -841,10 +917,10 @@ impl<'a> OrcaRustParser<'a> {
                     break;
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() > 3 && parts[0].contains(':') {
+                if parts.len() > ir_col && parts[0].contains(':') {
                     let idx_str = parts[0].replace(':', "");
                     if let (Some(idx), Some(inten)) =
-                        (parse_i32(&idx_str), parse_f64(parts[3]))
+                        (parse_i32(&idx_str), parse_f64(parts[ir_col]))
                     {
                         let idx = idx as usize;
                         if idx < data.frequencies.len() {
@@ -864,6 +940,7 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
         if let Some(rs) = raman_start {
+            let raman_col = find_intensity_column(&self.lines, rs, &["activity"], 2);
             let mut curr = rs + 5;
             while curr < self.len() {
                 let line = self.get(curr).trim();
@@ -874,10 +951,10 @@ impl<'a> OrcaRustParser<'a> {
                     break;
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() > 2 && parts[0].contains(':') {
+                if parts.len() > raman_col && parts[0].contains(':') {
                     let idx_str = parts[0].replace(':', "");
                     if let (Some(idx), Some(act)) =
-                        (parse_i32(&idx_str), parse_f64(parts[2]))
+                        (parse_i32(&idx_str), parse_f64(parts[raman_col]))
                     {
                         let idx = idx as usize;
                         if idx < data.frequencies.len() {
@@ -926,10 +1003,8 @@ impl<'a> OrcaRustParser<'a> {
                         if dparts.len() < 2 {
                             continue;
                         }
-                        let values: Vec<f64> = dparts[1..]
-                            .iter()
-                            .filter_map(|s| parse_f64(s))
-                            .collect();
+                        let values: Vec<f64> =
+                            dparts[1..].iter().filter_map(|s| parse_f64(s)).collect();
                         for (c, &m_idx) in headers.iter().enumerate() {
                             if c < values.len() {
                                 mode_buffer.entry(m_idx).or_default().push(values[c]);
@@ -1036,9 +1111,10 @@ impl<'a> OrcaRustParser<'a> {
         let imag_count = data
             .frequencies
             .iter()
-            .filter(|f| f.freq < 0.0)
+            .filter(|f| f.freq < -IMAGINARY_FREQ_THRESHOLD)
             .count() as f64;
-        data.thermal.insert("imaginary_freq_count".to_string(), imag_count);
+        data.thermal
+            .insert("imaginary_freq_count".to_string(), imag_count);
     }
 
     // -----------------------------------------------------------------------
@@ -1065,7 +1141,8 @@ impl<'a> OrcaRustParser<'a> {
         for (idx, spin) in start_indices {
             final_map.insert(spin, idx);
         }
-        let mut filtered: Vec<(usize, String)> = final_map.into_iter().map(|(s, i)| (i, s)).collect();
+        let mut filtered: Vec<(usize, String)> =
+            final_map.into_iter().map(|(s, i)| (i, s)).collect();
         filtered.sort_by_key(|(i, _)| *i);
 
         for (start_idx, spin) in filtered {
@@ -1073,7 +1150,9 @@ impl<'a> OrcaRustParser<'a> {
             // Find column header
             while curr < self.len() && curr < start_idx + 10 {
                 let line = self.get(curr);
-                if line.contains("NO") && (line.contains("OCC") || line.contains("E(Eh)") || line.contains("E(eV)")) {
+                if line.contains("NO")
+                    && (line.contains("OCC") || line.contains("E(Eh)") || line.contains("E(eV)"))
+                {
                     curr += 1;
                     break;
                 }
@@ -1081,7 +1160,11 @@ impl<'a> OrcaRustParser<'a> {
             }
             while curr < self.len() {
                 let line = self.get(curr).trim();
-                if line.is_empty() || line.contains("---") || line.contains("****") || line.contains("MULLIKEN") {
+                if line.is_empty()
+                    || line.contains("---")
+                    || line.contains("****")
+                    || line.contains("MULLIKEN")
+                {
                     break;
                 }
                 if line.starts_with('*') {
@@ -1135,7 +1218,8 @@ impl<'a> OrcaRustParser<'a> {
         for (idx, spin) in start_indices {
             final_map.insert(spin, idx);
         }
-        let mut filtered: Vec<(usize, String)> = final_map.into_iter().map(|(s, i)| (i, s)).collect();
+        let mut filtered: Vec<(usize, String)> =
+            final_map.into_iter().map(|(s, i)| (i, s)).collect();
         filtered.sort_by_key(|(i, _)| *i);
 
         for (start_idx, spin) in filtered {
@@ -1162,7 +1246,10 @@ impl<'a> OrcaRustParser<'a> {
                     curr += 1;
                     continue;
                 }
-                if line.contains("ORBITALS") && curr + 1 < self.len() && self.get(curr + 1).contains("--------") {
+                if line.contains("ORBITALS")
+                    && curr + 1 < self.len()
+                    && self.get(curr + 1).contains("--------")
+                {
                     break;
                 }
 
@@ -1228,14 +1315,24 @@ impl<'a> OrcaRustParser<'a> {
                         if let Some(cap) = RE_MERGED_ATOM.captures(parts[0]) {
                             if parts.len() >= 3 {
                                 let ai = parse_i32(&cap[1]).unwrap_or(-1);
-                                (ai, cap[2].to_string(), parts[1].to_string(), parts[2..].to_vec())
+                                (
+                                    ai,
+                                    cap[2].to_string(),
+                                    parts[1].to_string(),
+                                    parts[2..].to_vec(),
+                                )
                             } else {
                                 curr += 1;
                                 continue;
                             }
                         } else if parts.len() >= 3 && parts[0].parse::<i32>().is_ok() {
                             let ai = parse_i32(parts[0]).unwrap_or(-1);
-                            (ai, parts[1].to_string(), parts[2].to_string(), parts[3..].to_vec())
+                            (
+                                ai,
+                                parts[1].to_string(),
+                                parts[2].to_string(),
+                                parts[3..].to_vec(),
+                            )
                         } else {
                             curr += 1;
                             continue;
@@ -1280,27 +1377,47 @@ impl<'a> OrcaRustParser<'a> {
 
         for (i, &line) in self.lines.iter().enumerate() {
             let uu = line.to_uppercase();
-            if uu.contains("MULLIKEN ATOMIC CHARGES") { mulliken_start = i as i64; }
-            else if uu.contains("LOEWDIN ATOMIC CHARGES") { loewdin_start = i as i64; }
-            else if uu.contains("HIRSHFELD ANALYSIS") { hirshfeld_start = i as i64; }
-            else if uu.contains("MAYER POPULATION ANALYSIS") { mayer_start = i as i64; }
-            else if uu.contains("NATURAL POPULATIONS") { nbo_start = i as i64; }
-            else if uu.contains("CHELPG ATOMIC CHARGES") { chelpg_start = i as i64; }
-            else if uu.contains("MERZ-KOLLMAN ATOMIC CHARGES") || uu.contains("MK ATOMIC CHARGES") { mk_start = i as i64; }
-            else if uu.contains("MBIS ANALYSIS") { mbis_start = i as i64; }
-            else if uu.contains("RESP ATOMIC CHARGES") { resp_start = i as i64; }
-            else if uu.contains("FRONTIER MOLECULAR ORBITAL POPULATION ANALYSIS") { fmo_start = i as i64; }
+            if uu.contains("MULLIKEN ATOMIC CHARGES") {
+                mulliken_start = i as i64;
+            } else if uu.contains("LOEWDIN ATOMIC CHARGES") {
+                loewdin_start = i as i64;
+            } else if uu.contains("HIRSHFELD ANALYSIS") {
+                hirshfeld_start = i as i64;
+            } else if uu.contains("MAYER POPULATION ANALYSIS") {
+                mayer_start = i as i64;
+            } else if uu.contains("NATURAL POPULATIONS") {
+                nbo_start = i as i64;
+            } else if uu.contains("CHELPG ATOMIC CHARGES") {
+                chelpg_start = i as i64;
+            } else if uu.contains("MERZ-KOLLMAN ATOMIC CHARGES") || uu.contains("MK ATOMIC CHARGES")
+            {
+                mk_start = i as i64;
+            } else if uu.contains("MBIS ANALYSIS") {
+                mbis_start = i as i64;
+            } else if uu.contains("RESP ATOMIC CHARGES") {
+                resp_start = i as i64;
+            } else if uu.contains("FRONTIER MOLECULAR ORBITAL POPULATION ANALYSIS") {
+                fmo_start = i as i64;
+            }
         }
 
         // Standard block parser
-        let parse_standard = |start_idx: i64, header_lines: usize, hirshfeld: bool, mbis: bool| -> Vec<ChargeEntry> {
+        let parse_standard = |start_idx: i64,
+                              header_lines: usize,
+                              hirshfeld: bool,
+                              mbis: bool|
+         -> Vec<ChargeEntry> {
             let mut res = Vec::new();
-            if start_idx < 0 { return res; }
+            if start_idx < 0 {
+                return res;
+            }
             let mut curr = start_idx as usize + header_lines;
             while curr < self.len() {
                 let line = self.get(curr).trim();
                 if line.is_empty() || line.contains("---") || line.contains("Sum of") {
-                    if !res.is_empty() { break; }
+                    if !res.is_empty() {
+                        break;
+                    }
                     curr += 1;
                     continue;
                 }
@@ -1331,8 +1448,12 @@ impl<'a> OrcaRustParser<'a> {
                             if hirshfeld && parts.len() >= 4 {
                                 entry.spin = parse_f64(parts[3]);
                             } else if mbis {
-                                if parts.len() >= 4 { entry.population = parse_f64(parts[3]); }
-                                if parts.len() >= 5 { entry.spin = parse_f64(parts[4]); }
+                                if parts.len() >= 4 {
+                                    entry.population = parse_f64(parts[3]);
+                                }
+                                if parts.len() >= 5 {
+                                    entry.spin = parse_f64(parts[4]);
+                                }
                             }
                             res.push(entry);
                         }
@@ -1344,25 +1465,39 @@ impl<'a> OrcaRustParser<'a> {
         };
 
         let mulliken = parse_standard(mulliken_start, 2, false, false);
-        if !mulliken.is_empty() { data.charges.insert("Mulliken".to_string(), mulliken); }
+        if !mulliken.is_empty() {
+            data.charges.insert("Mulliken".to_string(), mulliken);
+        }
 
         let loewdin = parse_standard(loewdin_start, 2, false, false);
-        if !loewdin.is_empty() { data.charges.insert("Loewdin".to_string(), loewdin); }
+        if !loewdin.is_empty() {
+            data.charges.insert("Loewdin".to_string(), loewdin);
+        }
 
         let hirshfeld = parse_standard(hirshfeld_start, 2, true, false);
-        if !hirshfeld.is_empty() { data.charges.insert("Hirshfeld".to_string(), hirshfeld); }
+        if !hirshfeld.is_empty() {
+            data.charges.insert("Hirshfeld".to_string(), hirshfeld);
+        }
 
         let chelpg = parse_standard(chelpg_start, 2, false, false);
-        if !chelpg.is_empty() { data.charges.insert("CHELPG".to_string(), chelpg); }
+        if !chelpg.is_empty() {
+            data.charges.insert("CHELPG".to_string(), chelpg);
+        }
 
         let mk = parse_standard(mk_start, 2, false, false);
-        if !mk.is_empty() { data.charges.insert("MK".to_string(), mk); }
+        if !mk.is_empty() {
+            data.charges.insert("MK".to_string(), mk);
+        }
 
         let mbis = parse_standard(mbis_start, 3, false, true);
-        if !mbis.is_empty() { data.charges.insert("MBIS".to_string(), mbis); }
+        if !mbis.is_empty() {
+            data.charges.insert("MBIS".to_string(), mbis);
+        }
 
         let resp = parse_standard(resp_start, 2, false, false);
-        if !resp.is_empty() { data.charges.insert("RESP".to_string(), resp); }
+        if !resp.is_empty() {
+            data.charges.insert("RESP".to_string(), resp);
+        }
 
         // Mayer
         if mayer_start >= 0 {
@@ -1383,7 +1518,10 @@ impl<'a> OrcaRustParser<'a> {
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 4 {
-                    if let (Some(idx), Some(qa)) = (parse_i32(parts[0]), parse_f64(parts.get(4).copied().unwrap_or(""))) {
+                    if let (Some(idx), Some(qa)) = (
+                        parse_i32(parts[0]),
+                        parse_f64(parts.get(4).copied().unwrap_or("")),
+                    ) {
                         let mut entry = ChargeEntry {
                             atom_idx: idx,
                             atom_sym: parts[1].to_string(),
@@ -1402,7 +1540,8 @@ impl<'a> OrcaRustParser<'a> {
             }
             if !mayer_res.is_empty() {
                 if !data.charges.contains_key("Mulliken") {
-                    data.charges.insert("Mulliken".to_string(), mayer_res.clone());
+                    data.charges
+                        .insert("Mulliken".to_string(), mayer_res.clone());
                 }
                 data.charges.insert("Mayer".to_string(), mayer_res);
             }
@@ -1416,7 +1555,10 @@ impl<'a> OrcaRustParser<'a> {
             // Try summary table first
             let mut summary_start: i64 = -1;
             for i in nbo_s..nbo_s.saturating_add(2000).min(self.len()) {
-                if self.get(i).contains("Summary of Natural Population Analysis") {
+                if self
+                    .get(i)
+                    .contains("Summary of Natural Population Analysis")
+                {
                     summary_start = i as i64;
                     break;
                 }
@@ -1428,15 +1570,22 @@ impl<'a> OrcaRustParser<'a> {
                     let l = self.get(curr);
                     if l.contains("Atom No") && l.contains("Charge") && l.contains("Core") {
                         curr += 1;
-                        if curr < self.len() && self.get(curr).contains("----") { curr += 1; }
+                        if curr < self.len() && self.get(curr).contains("----") {
+                            curr += 1;
+                        }
                         break;
                     }
                     curr += 1;
                 }
                 while curr < self.len() {
                     let line = self.get(curr).trim();
-                    if line.contains("====") || line.contains("Total") { break; }
-                    if line.is_empty() { curr += 1; continue; }
+                    if line.contains("====") || line.contains("Total") {
+                        break;
+                    }
+                    if line.is_empty() {
+                        curr += 1;
+                        continue;
+                    }
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 7 {
                         if let (Some(idx), Some(chg), Some(core), Some(val), Some(ryd), Some(tot)) = (
@@ -1467,14 +1616,25 @@ impl<'a> OrcaRustParser<'a> {
                 let mut curr = nbo_s + 1;
                 while curr < self.len() {
                     let line = self.get(curr).trim();
-                    if line.contains("---") { curr += 1; continue; }
-                    if line.contains("================") || line.contains("Natural Electron Configuration") {
-                        if !nbo_charges.is_empty() { break; }
-                        curr += 1; continue;
+                    if line.contains("---") {
+                        curr += 1;
+                        continue;
+                    }
+                    if line.contains("================")
+                        || line.contains("Natural Electron Configuration")
+                    {
+                        if !nbo_charges.is_empty() {
+                            break;
+                        }
+                        curr += 1;
+                        continue;
                     }
                     if line.is_empty() {
-                        if !nbo_charges.is_empty() { break; }
-                        curr += 1; continue;
+                        if !nbo_charges.is_empty() {
+                            break;
+                        }
+                        curr += 1;
+                        continue;
                     }
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
@@ -1519,8 +1679,11 @@ impl<'a> OrcaRustParser<'a> {
                 while curr < self.len() {
                     let line = self.get(curr).trim();
                     if line.is_empty() || line.contains("--------") {
-                        if !fmo_data.is_empty() { break; }
-                        curr += 1; continue;
+                        if !fmo_data.is_empty() {
+                            break;
+                        }
+                        curr += 1;
+                        continue;
                     }
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 5 {
@@ -1581,16 +1744,20 @@ impl<'a> OrcaRustParser<'a> {
         if let Some(rest) = line.split(':').nth(1) {
             let parts: Vec<&str> = rest.trim().split_whitespace().collect();
             if parts.len() >= 3 {
-                if let (Some(x), Some(y), Some(z)) =
-                    (parse_f64(parts[0]), parse_f64(parts[1]), parse_f64(parts[2]))
-                {
+                if let (Some(x), Some(y), Some(z)) = (
+                    parse_f64(parts[0]),
+                    parse_f64(parts[1]),
+                    parse_f64(parts[2]),
+                ) {
                     // Look up to 7 lines ahead for Magnitude (Debye) or Magnitude (a.u.)
                     let mut mag_debye: Option<f64> = None;
                     let mut mag_au: Option<f64> = None;
                     for k in (idx + 1)..self.len().min(idx + 8) {
                         let lk = self.get(k);
                         if lk.contains("Magnitude") && lk.contains(':') {
-                            if let Some(val) = lk.split(':').nth(1).and_then(|s| parse_f64(s.trim())) {
+                            if let Some(val) =
+                                lk.split(':').nth(1).and_then(|s| parse_f64(s.trim()))
+                            {
                                 if lk.contains("Debye") {
                                     mag_debye = Some(val);
                                 } else {
@@ -1599,10 +1766,21 @@ impl<'a> OrcaRustParser<'a> {
                             }
                         }
                     }
-                    let mag = mag_debye
-                        .or(mag_au)
-                        .unwrap_or_else(|| (x * x + y * y + z * z).sqrt());
-                    data.dipole = Some(Dipole { x, y, z, magnitude: mag });
+                    // ORCA prints the components in atomic units (e*a0) and
+                    // the magnitudes separately in both a.u. and Debye.
+                    // Taking whichever magnitude was found and pairing it
+                    // with the a.u. vector put the components and the
+                    // magnitude on different scales, and the UI labelled
+                    // both Debye.
+                    let mag_au = mag_au.unwrap_or_else(|| (x * x + y * y + z * z).sqrt());
+                    let mag_debye = mag_debye.unwrap_or(mag_au * AU_TO_DEBYE);
+                    data.dipole = Some(Dipole {
+                        x,
+                        y,
+                        z,
+                        magnitude_au: mag_au,
+                        magnitude_debye: mag_debye,
+                    });
                 }
             }
         }
@@ -1654,7 +1832,10 @@ impl<'a> OrcaRustParser<'a> {
         }
 
         // Pass 2: Summary tables
-        let parse_summary_table = |states: &mut HashMap<i32, TddftState>, lines: &[&str], start_idx: usize, data_key: &str| {
+        let parse_summary_table = |states: &mut HashMap<i32, TddftState>,
+                                   lines: &[&str],
+                                   start_idx: usize,
+                                   data_key: &str| {
             let mut curr = start_idx + 1;
             let mut header_found = false;
 
@@ -1665,7 +1846,9 @@ impl<'a> OrcaRustParser<'a> {
                     continue;
                 }
                 let u_line = line.to_uppercase();
-                if (u_line.contains("TRANSITION") || u_line.contains("STATE")) && (u_line.contains("ENERGY") || u_line.contains("WAVELENGTH")) {
+                if (u_line.contains("TRANSITION") || u_line.contains("STATE"))
+                    && (u_line.contains("ENERGY") || u_line.contains("WAVELENGTH"))
+                {
                     header_found = true;
                     break;
                 }
@@ -1676,13 +1859,20 @@ impl<'a> OrcaRustParser<'a> {
                 }
                 curr += 1;
             }
-            if !header_found { return; }
+            if !header_found {
+                return;
+            }
 
             let mut data_parsing_started = false;
             while curr < lines.len() {
                 let line = lines[curr].trim();
-                if line.is_empty() { curr += 1; continue; }
-                if line.to_uppercase().contains("TOTAL") { break; }
+                if line.is_empty() {
+                    curr += 1;
+                    continue;
+                }
+                if line.to_uppercase().contains("TOTAL") {
+                    break;
+                }
                 if line.contains("--------") {
                     if !data_parsing_started {
                         data_parsing_started = true;
@@ -1703,7 +1893,10 @@ impl<'a> OrcaRustParser<'a> {
                             let target = parts[arrow_idx + 1];
                             if let Some(cap) = RE_TARGET_STATE.captures(target) {
                                 if let Some(s_id) = parse_i32(&cap[1]) {
-                                    let entry = states.entry(s_id).or_insert_with(|| TddftState { state: s_id, ..Default::default() });
+                                    let entry = states.entry(s_id).or_insert_with(|| TddftState {
+                                        state: s_id,
+                                        ..Default::default()
+                                    });
                                     let strength = parse_f64(parts[arrow_idx + 5]).unwrap_or(0.0);
                                     match data_key {
                                         "osc_len" => entry.osc_len = strength,
@@ -1715,13 +1908,19 @@ impl<'a> OrcaRustParser<'a> {
                                         _ => {}
                                     }
                                     if let Some(ev) = parse_f64(parts[arrow_idx + 2]) {
-                                        if entry.energy_ev == 0.0 { entry.energy_ev = ev; }
+                                        if entry.energy_ev == 0.0 {
+                                            entry.energy_ev = ev;
+                                        }
                                     }
                                     if let Some(cm) = parse_f64(parts[arrow_idx + 3]) {
-                                        if entry.energy_cm == 0.0 { entry.energy_cm = cm; }
+                                        if entry.energy_cm == 0.0 {
+                                            entry.energy_cm = cm;
+                                        }
                                     }
                                     if let Some(nm) = parse_f64(parts[arrow_idx + 4]) {
-                                        if entry.energy_nm == 0.0 { entry.energy_nm = nm; }
+                                        if entry.energy_nm == 0.0 {
+                                            entry.energy_nm = nm;
+                                        }
                                     }
                                 }
                             }
@@ -1729,7 +1928,10 @@ impl<'a> OrcaRustParser<'a> {
                     }
                 } else if parts.len() >= 4 && parts[0].parse::<i32>().is_ok() {
                     if let Some(s_id) = parse_i32(parts[0]) {
-                        let entry = states.entry(s_id).or_insert_with(|| TddftState { state: s_id, ..Default::default() });
+                        let entry = states.entry(s_id).or_insert_with(|| TddftState {
+                            state: s_id,
+                            ..Default::default()
+                        });
                         let strength = parse_f64(parts[3]).unwrap_or(0.0);
                         match data_key {
                             "osc_len" => entry.osc_len = strength,
@@ -1740,8 +1942,12 @@ impl<'a> OrcaRustParser<'a> {
                             "rot_vel" => entry.rot_vel = strength,
                             _ => {}
                         }
-                        if entry.energy_ev == 0.0 { entry.energy_ev = parse_f64(parts[1]).unwrap_or(0.0); }
-                        if entry.energy_nm == 0.0 { entry.energy_nm = parse_f64(parts[2]).unwrap_or(0.0); }
+                        if entry.energy_ev == 0.0 {
+                            entry.energy_ev = parse_f64(parts[1]).unwrap_or(0.0);
+                        }
+                        if entry.energy_nm == 0.0 {
+                            entry.energy_nm = parse_f64(parts[2]).unwrap_or(0.0);
+                        }
                     }
                 }
                 curr += 1;
@@ -1779,7 +1985,10 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
 
-        let mut valid: Vec<TddftState> = states_dict.into_values().filter(|s| s.energy_ev > 0.0).collect();
+        let mut valid: Vec<TddftState> = states_dict
+            .into_values()
+            .filter(|s| s.energy_ev > 0.0)
+            .collect();
         valid.sort_by(|a, b| a.energy_ev.partial_cmp(&b.energy_ev).unwrap());
         data.tddft = valid;
     }
@@ -1791,7 +2000,10 @@ impl<'a> OrcaRustParser<'a> {
         // Shielding summary
         let mut summary_start: i64 = -1;
         for (i, &line) in self.lines.iter().enumerate() {
-            if line.to_uppercase().contains("CHEMICAL SHIELDING SUMMARY (PPM)") {
+            if line
+                .to_uppercase()
+                .contains("CHEMICAL SHIELDING SUMMARY (PPM)")
+            {
                 summary_start = i as i64;
                 break;
             }
@@ -1802,7 +2014,8 @@ impl<'a> OrcaRustParser<'a> {
             while curr < self.len() && curr < summary_start as usize + 10 {
                 let l_up = self.get(curr).to_uppercase();
                 if (l_up.contains('N') && l_up.contains("SHIELDING"))
-                    || (l_up.contains("NUCLEUS") && (l_up.contains("ISOTROPIC") || l_up.contains("ELEMENT")))
+                    || (l_up.contains("NUCLEUS")
+                        && (l_up.contains("ISOTROPIC") || l_up.contains("ELEMENT")))
                 {
                     curr += 1;
                     break;
@@ -1811,10 +2024,15 @@ impl<'a> OrcaRustParser<'a> {
             }
             while curr < self.len() {
                 let line = self.get(curr).trim();
-                if line.is_empty() { break; }
+                if line.is_empty() {
+                    break;
+                }
                 if line.contains("---") {
-                    if !data.nmr_shielding.is_empty() { break; }
-                    curr += 1; continue;
+                    if !data.nmr_shielding.is_empty() {
+                        break;
+                    }
+                    curr += 1;
+                    continue;
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 3 {
@@ -1833,7 +2051,10 @@ impl<'a> OrcaRustParser<'a> {
         // Couplings
         let mut coupling_start: i64 = -1;
         for (i, &line) in self.lines.iter().enumerate() {
-            if line.to_uppercase().contains("SUMMARY OF ISOTROPIC COUPLING CONSTANTS") {
+            if line
+                .to_uppercase()
+                .contains("SUMMARY OF ISOTROPIC COUPLING CONSTANTS")
+            {
                 coupling_start = i as i64;
                 break;
             }
@@ -1852,11 +2073,22 @@ impl<'a> OrcaRustParser<'a> {
             let mut current_col_indices: Vec<i32> = Vec::new();
             while curr < self.len() {
                 let line = self.get(curr).trim();
-                if line.is_empty() { curr += 1; continue; }
-                if line.contains("Maximum memory used") || line.contains("Timings") || line.contains("ORCA TERMINATED") { break; }
+                if line.is_empty() {
+                    curr += 1;
+                    continue;
+                }
+                if line.contains("Maximum memory used")
+                    || line.contains("Timings")
+                    || line.contains("ORCA TERMINATED")
+                {
+                    break;
+                }
 
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.is_empty() { curr += 1; continue; }
+                if parts.is_empty() {
+                    curr += 1;
+                    continue;
+                }
 
                 // Header detection: 3rd token is integer
                 let is_header = if parts.len() >= 3 {
@@ -1906,7 +2138,11 @@ impl<'a> OrcaRustParser<'a> {
     // parse_basis_set
     // -----------------------------------------------------------------------
     fn parse_basis_set(&self, data: &mut ParsedData) {
-        let start_idx = match self.lines.iter().position(|l| l.contains("BASIS SET IN INPUT FORMAT")) {
+        let start_idx = match self
+            .lines
+            .iter()
+            .position(|l| l.contains("BASIS SET IN INPUT FORMAT"))
+        {
             Some(i) => i,
             None => return,
         };
@@ -1919,16 +2155,26 @@ impl<'a> OrcaRustParser<'a> {
         while curr < self.len() {
             let line = self.get(curr).trim();
 
-            if line.contains("--------") && curr > start_idx + 10 { break; }
-            if line.contains("AUXILIARY BASIS") { break; }
+            if line.contains("--------") && curr > start_idx + 10 {
+                break;
+            }
+            if line.contains("AUXILIARY BASIS") {
+                break;
+            }
 
             if line.starts_with("NewGTO") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     if let Some(sym) = &current_sym {
-                        let shells = current_shells.drain(..).map(|(l, exps, coeffs)| BasisShell {
-                            l, exps, coeffs, ..Default::default()
-                        }).collect();
+                        let shells = current_shells
+                            .drain(..)
+                            .map(|(l, exps, coeffs)| BasisShell {
+                                l,
+                                exps,
+                                coeffs,
+                                ..Default::default()
+                            })
+                            .collect();
                         basis_defs.insert(sym.clone(), shells);
                     }
                     current_sym = Some(parts[1].to_string());
@@ -1940,9 +2186,15 @@ impl<'a> OrcaRustParser<'a> {
 
             if line.starts_with("end") {
                 if let Some(sym) = &current_sym {
-                    let shells = current_shells.drain(..).map(|(l, exps, coeffs)| BasisShell {
-                        l, exps, coeffs, ..Default::default()
-                    }).collect();
+                    let shells = current_shells
+                        .drain(..)
+                        .map(|(l, exps, coeffs)| BasisShell {
+                            l,
+                            exps,
+                            coeffs,
+                            ..Default::default()
+                        })
+                        .collect();
                     basis_defs.insert(sym.clone(), shells);
                 }
                 current_sym = None;
@@ -1951,7 +2203,10 @@ impl<'a> OrcaRustParser<'a> {
             }
 
             let parts: Vec<&str> = line.split_whitespace().collect();
-            let l_map: HashMap<&str, i32> = [("S", 0), ("P", 1), ("D", 2), ("F", 3), ("G", 4)].iter().cloned().collect();
+            let l_map: HashMap<&str, i32> = [("S", 0), ("P", 1), ("D", 2), ("F", 3), ("G", 4)]
+                .iter()
+                .cloned()
+                .collect();
             if parts.len() >= 2 && l_map.contains_key(parts[0].to_uppercase().as_str()) {
                 let sh_type = parts[0].to_uppercase();
                 if let Some(&l_val) = l_map.get(sh_type.as_str()) {
@@ -1961,11 +2216,14 @@ impl<'a> OrcaRustParser<'a> {
                             let mut exps = Vec::new();
                             let mut coeffs = Vec::new();
                             for _ in 0..n_prim {
-                                if curr >= self.len() { break; }
+                                if curr >= self.len() {
+                                    break;
+                                }
                                 let pl = self.get(curr).trim();
                                 let pp: Vec<&str> = pl.split_whitespace().collect();
                                 if pp.len() >= 3 {
-                                    if let (Some(e), Some(c)) = (parse_f64(pp[1]), parse_f64(pp[2])) {
+                                    if let (Some(e), Some(c)) = (parse_f64(pp[1]), parse_f64(pp[2]))
+                                    {
                                         exps.push(e);
                                         coeffs.push(c);
                                     }
@@ -1982,11 +2240,15 @@ impl<'a> OrcaRustParser<'a> {
             }
 
             curr += 1;
-            if curr > start_idx + 5000 { break; }
+            if curr > start_idx + 5000 {
+                break;
+            }
         }
 
         // Expand to actual atoms
-        if data.atoms.is_empty() { return; }
+        if data.atoms.is_empty() {
+            return;
+        }
         for (idx, (sym, coord)) in data.atoms.iter().zip(data.coords.iter()).enumerate() {
             if let Some(shells) = basis_defs.get(sym) {
                 for s in shells {
@@ -2020,7 +2282,9 @@ impl<'a> OrcaRustParser<'a> {
                     current_step_label = "Opt Cycle".to_string();
                 }
             } else if uu.contains("SCAN STEP") {
-                current_step_label = line.split_whitespace().last()
+                current_step_label = line
+                    .split_whitespace()
+                    .last()
                     .map(|s| format!("Scan Step {}", s))
                     .unwrap_or_else(|| "Scan Step".to_string());
             } else if uu.contains("ORCA PROPERTIES") || uu.contains("ORCA PROPERTY") {
@@ -2029,10 +2293,15 @@ impl<'a> OrcaRustParser<'a> {
                 current_step_label = "Post-Opt/Final".to_string();
             }
 
-            if uu.contains("SCF ITERATIONS") || uu.contains("ORCA LEAN-SCF") || uu.contains("INCREMENTAL FOCK MATRIX") {
+            if uu.contains("SCF ITERATIONS")
+                || uu.contains("ORCA LEAN-SCF")
+                || uu.contains("INCREMENTAL FOCK MATRIX")
+            {
                 let mut header_idx: i64 = -1;
                 for k in 1..15usize {
-                    if i + k >= self.len() { break; }
+                    if i + k >= self.len() {
+                        break;
+                    }
                     let uu_k = self.get(i + k).to_uppercase();
                     if uu_k.contains("ITER") && uu_k.contains("ENERGY") {
                         header_idx = (i + k) as i64;
@@ -2049,22 +2318,35 @@ impl<'a> OrcaRustParser<'a> {
 
                     while idx < self.len() {
                         let l_scf = self.get(idx).trim();
-                        if l_scf.is_empty() || l_scf.contains("---") || l_scf.contains("SUCCESS") || l_scf.contains("Energy Check") {
-                            if !trace.is_empty() { break; }
+                        if l_scf.is_empty()
+                            || l_scf.contains("---")
+                            || l_scf.contains("SUCCESS")
+                            || l_scf.contains("Energy Check")
+                        {
+                            if !trace.is_empty() {
+                                break;
+                            }
                             idx += 1;
                             continue;
                         }
                         let parts: Vec<&str> = l_scf.split_whitespace().collect();
                         if parts.len() >= 2 {
-                            if let (Some(it_no), Some(it_en)) = (parse_i32(parts[0]), parse_f64(parts[1])) {
-                                trace.push(ScfIter { iter: it_no, energy: it_en });
+                            if let (Some(it_no), Some(it_en)) =
+                                (parse_i32(parts[0]), parse_f64(parts[1]))
+                            {
+                                trace.push(ScfIter {
+                                    iter: it_no,
+                                    energy: it_en,
+                                });
                             }
                         }
                         idx += 1;
                     }
 
                     if !trace.is_empty() {
-                        let same_count = data.scf_traces.iter()
+                        let same_count = data
+                            .scf_traces
+                            .iter()
                             .filter(|t| t.step.starts_with(&current_step_label))
                             .count();
                         let label = if same_count > 0 {
@@ -2072,7 +2354,10 @@ impl<'a> OrcaRustParser<'a> {
                         } else {
                             current_step_label.clone()
                         };
-                        data.scf_traces.push(ScfTrace { step: label, iterations: trace });
+                        data.scf_traces.push(ScfTrace {
+                            step: label,
+                            iterations: trace,
+                        });
                         i = idx;
                         continue;
                     }
@@ -2086,7 +2371,11 @@ impl<'a> OrcaRustParser<'a> {
     // parse_scan_results_table
     // -----------------------------------------------------------------------
     fn parse_scan_results_table(&self, data: &mut ParsedData) {
-        let data_start = self.lines.iter().enumerate().rev()
+        let data_start = self
+            .lines
+            .iter()
+            .enumerate()
+            .rev()
             .find(|(_, l)| l.contains("Actual Energy"))
             .map(|(i, _)| i + 1);
         let data_start = match data_start {
@@ -2098,12 +2387,16 @@ impl<'a> OrcaRustParser<'a> {
         for i in data_start..self.len() {
             let line = self.get(i).trim();
             if line.is_empty() {
-                if !table_vals.is_empty() { break; }
+                if !table_vals.is_empty() {
+                    break;
+                }
                 continue;
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
-                if let (Some(coord), Some(en)) = (parse_f64(parts[0]), parse_f64(parts[parts.len() - 1])) {
+                if let (Some(coord), Some(en)) =
+                    (parse_f64(parts[0]), parse_f64(parts[parts.len() - 1]))
+                {
                     table_vals.push((coord, en));
                 } else if !table_vals.is_empty() {
                     break;
@@ -2111,7 +2404,9 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
 
-        if table_vals.is_empty() { return; }
+        if table_vals.is_empty() {
+            return;
+        }
 
         if data.scan_steps.is_empty() {
             for (idx, (coord, en)) in table_vals.iter().enumerate() {
@@ -2125,7 +2420,9 @@ impl<'a> OrcaRustParser<'a> {
                 });
             }
         } else {
-            let sids: Vec<i32> = data.scan_steps.iter()
+            let sids: Vec<i32> = data
+                .scan_steps
+                .iter()
                 .filter_map(|s| s.scan_step_id)
                 .collect();
             if !sids.is_empty() {
@@ -2175,14 +2472,22 @@ fn do_parse_xyz_content<'py>(py: Python<'py>, content: &str) -> PyResult<Bound<'
 
     while i < n_lines {
         let line = lines[i].trim();
-        if line.is_empty() { i += 1; continue; }
+        if line.is_empty() {
+            i += 1;
+            continue;
+        }
 
         let natoms = match line.parse::<usize>() {
             Ok(n) => n,
-            Err(_) => { i += 1; continue; }
+            Err(_) => {
+                i += 1;
+                continue;
+            }
         };
         i += 1;
-        if i >= n_lines { break; }
+        if i >= n_lines {
+            break;
+        }
 
         let comment = lines[i].trim();
         let upper_comment = comment.to_uppercase();
@@ -2197,25 +2502,37 @@ fn do_parse_xyz_content<'py>(py: Python<'py>, content: &str) -> PyResult<Bound<'
         }
 
         // Extract energy
-        let energy = RE_ENERGY_LABEL.captures(comment)
+        let energy = RE_ENERGY_LABEL
+            .captures(comment)
             .and_then(|c| parse_f64(&c[1]))
             .or_else(|| {
-                RE_FLOATS_IN_LINE.find_iter(comment).last().and_then(|m| parse_f64(m.as_str()))
+                RE_FLOATS_IN_LINE
+                    .find_iter(comment)
+                    .last()
+                    .and_then(|m| parse_f64(m.as_str()))
             })
             .unwrap_or(0.0);
 
         // Extract distance/coord
-        let dist_val = RE_DIST_LABEL.captures(comment).and_then(|c| parse_f64(&c[1]));
+        let dist_val = RE_DIST_LABEL
+            .captures(comment)
+            .and_then(|c| parse_f64(&c[1]));
 
         i += 1;
         let mut atoms: Vec<String> = Vec::new();
         let mut coords: Vec<[f64; 3]> = Vec::new();
 
         for _ in 0..natoms {
-            if i >= n_lines { break; }
+            if i >= n_lines {
+                break;
+            }
             let parts: Vec<&str> = lines[i].split_whitespace().collect();
             if parts.len() >= 4 {
-                if let (Some(x), Some(y), Some(z)) = (parse_f64(parts[1]), parse_f64(parts[2]), parse_f64(parts[3])) {
+                if let (Some(x), Some(y), Some(z)) = (
+                    parse_f64(parts[1]),
+                    parse_f64(parts[2]),
+                    parse_f64(parts[3]),
+                ) {
                     atoms.push(parts[0].to_string());
                     coords.push([x, y, z]);
                 }
@@ -2333,19 +2650,45 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
             ed.set_item("atom_idx", e.atom_idx)?;
             ed.set_item("atom_sym", e.atom_sym.clone())?;
             ed.set_item("charge", e.charge)?;
-            if let Some(v) = e.spin { ed.set_item("spin", v)?; }
-            if let Some(v) = e.population { ed.set_item("population", v)?; }
-            if let Some(v) = e.valency { ed.set_item("valency", v)?; }
-            if let Some(v) = e.bonded_valency { ed.set_item("bonded_valency", v)?; }
-            if let Some(v) = e.free_valency { ed.set_item("free_valency", v)?; }
-            if let Some(v) = e.core { ed.set_item("core", v)?; }
-            if let Some(v) = e.valence { ed.set_item("valence", v)?; }
-            if let Some(v) = e.rydberg { ed.set_item("rydberg", v)?; }
-            if let Some(v) = e.total { ed.set_item("total", v)?; }
-            if let Some(v) = e.homo_mulliken { ed.set_item("homo_mulliken", v)?; }
-            if let Some(v) = e.homo_loewdin { ed.set_item("homo_loewdin", v)?; }
-            if let Some(v) = e.lumo_mulliken { ed.set_item("lumo_mulliken", v)?; }
-            if let Some(v) = e.lumo_loewdin { ed.set_item("lumo_loewdin", v)?; }
+            if let Some(v) = e.spin {
+                ed.set_item("spin", v)?;
+            }
+            if let Some(v) = e.population {
+                ed.set_item("population", v)?;
+            }
+            if let Some(v) = e.valency {
+                ed.set_item("valency", v)?;
+            }
+            if let Some(v) = e.bonded_valency {
+                ed.set_item("bonded_valency", v)?;
+            }
+            if let Some(v) = e.free_valency {
+                ed.set_item("free_valency", v)?;
+            }
+            if let Some(v) = e.core {
+                ed.set_item("core", v)?;
+            }
+            if let Some(v) = e.valence {
+                ed.set_item("valence", v)?;
+            }
+            if let Some(v) = e.rydberg {
+                ed.set_item("rydberg", v)?;
+            }
+            if let Some(v) = e.total {
+                ed.set_item("total", v)?;
+            }
+            if let Some(v) = e.homo_mulliken {
+                ed.set_item("homo_mulliken", v)?;
+            }
+            if let Some(v) = e.homo_loewdin {
+                ed.set_item("homo_loewdin", v)?;
+            }
+            if let Some(v) = e.lumo_mulliken {
+                ed.set_item("lumo_mulliken", v)?;
+            }
+            if let Some(v) = e.lumo_loewdin {
+                ed.set_item("lumo_loewdin", v)?;
+            }
             el.append(ed)?;
         }
         charges_dict.set_item(k, el)?;
@@ -2359,10 +2702,33 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
             d.set_item("dipoles", py.None())?;
         }
         Some(dip) => {
+            // Prefer ORCA's own pair of magnitudes for the scale factor so
+            // the vector stays consistent with what it printed.
+            let to_debye = if dip.magnitude_au > 1e-12 {
+                dip.magnitude_debye / dip.magnitude_au
+            } else {
+                AU_TO_DEBYE
+            };
             let dd = PyDict::new_bound(py);
-            let vec_list = PyList::new_bound(py, &[dip.x, dip.y, dip.z]);
-            dd.set_item("vector", vec_list)?;
-            dd.set_item("magnitude", dip.magnitude)?;
+            dd.set_item("vector_au", PyList::new_bound(py, &[dip.x, dip.y, dip.z]))?;
+            dd.set_item(
+                "vector_debye",
+                PyList::new_bound(
+                    py,
+                    &[dip.x * to_debye, dip.y * to_debye, dip.z * to_debye],
+                ),
+            )?;
+            dd.set_item("magnitude_au", dip.magnitude_au)?;
+            dd.set_item("magnitude_debye", dip.magnitude_debye)?;
+            // Back-compat aliases (Debye, matching the UI labels).
+            dd.set_item(
+                "vector",
+                PyList::new_bound(
+                    py,
+                    &[dip.x * to_debye, dip.y * to_debye, dip.z * to_debye],
+                ),
+            )?;
+            dd.set_item("magnitude", dip.magnitude_debye)?;
             d.set_item("dipole", &dd)?;
             d.set_item("dipoles", dd)?;
         }
@@ -2464,7 +2830,9 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
 
     // all_steps (alias, same as scan_steps)
     let steps_alias = PyList::empty_bound(py);
-    for item in steps_list.iter() { steps_alias.append(item)?; }
+    for item in steps_list.iter() {
+        steps_alias.append(item)?;
+    }
     d.set_item("all_steps", steps_alias)?;
 
     // gradients (last gradient block)

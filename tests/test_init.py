@@ -17,7 +17,7 @@ import types
 import tempfile
 import importlib.util
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -404,9 +404,7 @@ def _real_utils_module():
     of the real implementation. Tests that need the real dict-clearing
     behavior swap this module in for the duration of the test.
     """
-    path = os.path.normpath(
-        os.path.join(_SRC_DIR, "orca_result_analyzer_rust", "utils.py")
-    )
+    path = os.path.normpath(os.path.join(_SRC_DIR, "orca_result_analyzer_rust", "utils.py"))
     spec = importlib.util.spec_from_file_location("orca_result_analyzer_rust.utils", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -443,7 +441,9 @@ class TestDocumentResetHandler(unittest.TestCase):
         try:
             handler()
         except Exception as exc:
-            self.fail(f"document reset handler should not raise without a window: {exc}")
+            self.fail(
+                f"document reset handler should not raise without a window: {exc}"
+            )
 
     def test_handler_survives_window_close_exception(self):
         fake_win = MagicMock()
@@ -476,6 +476,128 @@ class TestDocumentResetHandler(unittest.TestCase):
         handler()
 
         self.assertEqual(fixed_mw.view_3d_manager._plugin_color_overrides, {})
+
+
+class TestReadOrcaFile(unittest.TestCase):
+    """_read_orca_file tries several encodings before giving up."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        self.parent = MagicMock()
+
+    def _write(self, name, text, encoding="utf-8"):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding=encoding) as fh:
+            fh.write(text)
+        return path
+
+    def test_a_utf8_file_is_read(self):
+        path = self._write("utf8.out", "ORCA TERMINATED NORMALLY\n")
+        self.assertIn("TERMINATED", _init_mod._read_orca_file(path, self.parent))
+
+    def test_a_utf16_file_is_read(self):
+        path = self._write("utf16.out", "ORCA TERMINATED NORMALLY\n", encoding="utf-16")
+        self.assertIn("TERMINATED", _init_mod._read_orca_file(path, self.parent))
+
+    def test_a_latin1_file_is_read(self):
+        path = self._write("latin1.out", "Angström\n", encoding="latin-1")
+        self.assertIsNotNone(_init_mod._read_orca_file(path, self.parent))
+
+    def test_undecodable_bytes_fall_back_to_replacement(self):
+        path = os.path.join(self.tmp, "binary.out")
+        with open(path, "wb") as fh:
+            fh.write(b"ORCA\x00\xff\xfe\xfd rubbish\n")
+        self.assertIsNotNone(_init_mod._read_orca_file(path, self.parent))
+
+    def _read_expecting_error(self, path):
+        """Read *path* with a known-good QMessageBox, returning (result, box).
+
+        Other test modules install their own PyQt6 stubs process-wide, so pin
+        the message box rather than relying on whichever one is currently
+        bound; the error branch calls QMessageBox.critical.
+        """
+        box = MagicMock()
+        with patch.object(_init_mod, "QMessageBox", box):
+            result = _init_mod._read_orca_file(path, self.parent)
+        return result, box
+
+    def test_a_missing_file_reports_an_error(self):
+        missing = os.path.join(self.tmp, "nope.out")
+        result, box = self._read_expecting_error(missing)
+        self.assertIsNone(result)
+        box.critical.assert_called_once()
+
+    def test_a_directory_reports_an_error(self):
+        result, box = self._read_expecting_error(self.tmp)
+        self.assertIsNone(result)
+        box.critical.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestOpenAnalyzerEmptyReuseBranch
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAnalyzerEmptyReuseBranch(unittest.TestCase):
+    """_open_orca_analyzer_empty() re-shows a registered window instead of
+    rebuilding it, so a closed window MUST have left the registry — otherwise
+    the stale dialog comes back with its plotter picking already torn down.
+
+    The real dialog class is swapped out here; only the branch matters.
+    """
+
+    def setUp(self):
+        self.ctx = StubContext()
+        self.built = []
+
+        def _factory(mw, parser, path, context):
+            win = MagicMock()
+            self.built.append(win)
+            return win
+
+        gui_stub = types.ModuleType("orca_result_analyzer_rust.gui")
+        gui_stub.OrcaResultAnalyzerDialog = _factory
+        utils_stub = types.ModuleType("orca_result_analyzer_rust.utils")
+        utils_stub.clear_atom_color_overrides = MagicMock()
+
+        self._saved = {
+            k: sys.modules.get(k)
+            for k in ("orca_result_analyzer_rust.gui", "orca_result_analyzer_rust.utils")
+        }
+        sys.modules["orca_result_analyzer_rust.gui"] = gui_stub
+        sys.modules["orca_result_analyzer_rust.utils"] = utils_stub
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def test_a_first_open_builds_and_registers_a_window(self):
+        _init_mod._open_orca_analyzer_empty(self.ctx)
+        self.assertEqual(len(self.built), 1)
+        self.assertIs(self.ctx.get_window("analyzer"), self.built[0])
+
+    def test_a_registered_window_is_reused_not_rebuilt(self):
+        _init_mod._open_orca_analyzer_empty(self.ctx)
+        _init_mod._open_orca_analyzer_empty(self.ctx)
+        self.assertEqual(len(self.built), 1)
+        self.built[0].show.assert_called()
+
+    def test_a_deregistered_window_is_rebuilt(self):
+        """What closing must enable: the next open gets a live dialog."""
+        _init_mod._open_orca_analyzer_empty(self.ctx)
+        first = self.built[0]
+
+        # gui.closeEvent does exactly this.
+        self.ctx.register_window("analyzer", None)
+
+        _init_mod._open_orca_analyzer_empty(self.ctx)
+        self.assertEqual(len(self.built), 2)
+        self.assertIsNot(self.ctx.get_window("analyzer"), first)
 
 
 if __name__ == "__main__":

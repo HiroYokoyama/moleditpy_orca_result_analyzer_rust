@@ -17,18 +17,24 @@ use rayon::prelude::*;
 // GTO helpers
 // ---------------------------------------------------------------------------
 
+/// Factorials indexed by n: FACT[n] = n!, FACT2[n] = (2n)!
+const FACT: [f64; 9] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0];
+const FACT2: [f64; 9] = [
+    1.0,
+    2.0,
+    24.0,
+    720.0,
+    40320.0,
+    3628800.0,
+    479001600.0,
+    87178291200.0,
+    20922789888000.0,
+];
+
 /// GTO Cartesian normalisation prefactor N(α, l, m, n).
 fn normalization_prefactor(alpha: f64, l: u32, m: u32, n: u32) -> f64 {
-    const FACT: [f64; 9] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0];
-    const FACT2: [f64; 9] = [
-        1.0, 2.0, 24.0, 720.0, 40320.0, 3628800.0, 479001600.0, 87178291200.0,
-        20922789888000.0,
-    ];
     let big_l = (l + m + n) as f64;
-    let num = (8.0 * alpha).powf(big_l)
-        * FACT[l as usize]
-        * FACT[m as usize]
-        * FACT[n as usize];
+    let num = (8.0 * alpha).powf(big_l) * FACT[l as usize] * FACT[m as usize] * FACT[n as usize];
     let den = FACT2[l as usize] * FACT2[m as usize] * FACT2[n as usize];
     (2.0 * alpha / std::f64::consts::PI).powf(0.75) * (num / den).sqrt()
 }
@@ -55,33 +61,105 @@ fn ang_pow(v: f64, exp: u32) -> f64 {
 
 type BasisCompDef = (f64, u32, u32, u32); // (weight, l, m, n)
 
+/// Angular part of the Cartesian Gaussian normalisation.
+fn n_cart_part(l: u32, m: u32, n: u32) -> f64 {
+    ((FACT[l as usize] * FACT[m as usize] * FACT[n as usize])
+        / (FACT2[l as usize] * FACT2[m as usize] * FACT2[n as usize]))
+        .sqrt()
+}
+
+/// (k-1)!! for even k — the 1-D Gaussian moment integral factor.
+fn odd_double_factorial(mut k: u32) -> f64 {
+    let mut result = 1.0;
+    while k > 1 {
+        result *= (k - 1) as f64;
+        k -= 2;
+    }
+    result
+}
+
+/// Overlap of two normalised Cartesian Gaussians in the same shell, scaled so
+/// a single component overlaps itself as 1.0. The radial part is shared by
+/// every component of a shell, so it cancels and the exponent drops out.
+fn angular_overlap(a: (u32, u32, u32), b: (u32, u32, u32)) -> f64 {
+    let pairs = [(a.0, b.0), (a.1, b.1), (a.2, b.2)];
+    let mut moment = 1.0;
+    for (ka, kb) in pairs {
+        let k = ka + kb;
+        if k % 2 == 1 {
+            return 0.0; // odd power integrates to zero over all space
+        }
+        moment *= odd_double_factorial(k);
+    }
+    let total_l = a.0 + a.1 + a.2;
+    (2.0_f64).powi(total_l as i32)
+        * moment
+        * n_cart_part(a.0, a.1, a.2)
+        * n_cart_part(b.0, b.1, b.2)
+}
+
+/// Turn real-solid-harmonic polynomials into component weights.
+///
+/// Each component is evaluated as N_cart(l,m,n) * x^l y^m z^n, and N_cart
+/// depends on how L is split across the axes (N(0,0,3) = N(2,0,1)/sqrt(5)).
+/// So the raw polynomial coefficient is divided by N_cart to recover the
+/// intended shape, then the whole component is normalised against the exact
+/// angular overlap to fix the scale. Hand-typed prefactor tables got both of
+/// these wrong: the f table distorted 5 of 7 components (the f(z^3) nodal
+/// cone sat at 28.6 deg instead of 39.2) and the g table disagreed between
+/// components (g2 came out ~2x the norm of g1).
+fn build_sph_defs(polys: &[&[BasisCompDef]]) -> Vec<Vec<BasisCompDef>> {
+    polys
+        .iter()
+        .map(|poly| {
+            let weights: Vec<BasisCompDef> = poly
+                .iter()
+                .map(|&(c_poly, l, m, n)| (c_poly / n_cart_part(l, m, n), l, m, n))
+                .collect();
+            let mut norm_sq = 0.0;
+            for &(wa, la, ma, na) in &weights {
+                for &(wb, lb, mb, nb) in &weights {
+                    norm_sq += wa * wb * angular_overlap((la, ma, na), (lb, mb, nb));
+                }
+            }
+            let scale = if norm_sq > 0.0 {
+                1.0 / norm_sq.sqrt()
+            } else {
+                1.0
+            };
+            weights
+                .into_iter()
+                .map(|(w, l, m, n)| (w * scale, l, m, n))
+                .collect()
+        })
+        .collect()
+}
+
+/// Spherical F (7 components), ORCA m order 0,+1,-1,+2,-2,+3,-3.
+fn build_f_shell_defs() -> Vec<Vec<BasisCompDef>> {
+    let f_polys: [&[BasisCompDef]; 7] = [
+        // f(0): z(5z^2 - 3r^2) = 2z^3 - 3x^2 z - 3y^2 z
+        &[(2.0, 0, 0, 3), (-3.0, 2, 0, 1), (-3.0, 0, 2, 1)],
+        // f(+1): x(5z^2 - r^2) = 4xz^2 - x^3 - xy^2
+        &[(4.0, 1, 0, 2), (-1.0, 3, 0, 0), (-1.0, 1, 2, 0)],
+        // f(-1): y(5z^2 - r^2)
+        &[(4.0, 0, 1, 2), (-1.0, 2, 1, 0), (-1.0, 0, 3, 0)],
+        // f(+2): z(x^2 - y^2)
+        &[(1.0, 2, 0, 1), (-1.0, 0, 2, 1)],
+        // f(-2): xyz
+        &[(1.0, 1, 1, 1)],
+        // f(+3): x(x^2 - 3y^2)
+        &[(1.0, 3, 0, 0), (-3.0, 1, 2, 0)],
+        // f(-3): y(3x^2 - y^2)
+        &[(3.0, 2, 1, 0), (-1.0, 0, 3, 0)],
+    ];
+    build_sph_defs(&f_polys)
+}
+
+/// Spherical G (9 components), same m ordering.
 fn build_g_shell_defs() -> Vec<Vec<BasisCompDef>> {
-    const FACT: [f64; 9] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0];
-    const FACT2: [f64; 9] = [
-        1.0, 2.0, 24.0, 720.0, 40320.0, 3628800.0, 479001600.0, 87178291200.0,
-        20922789888000.0,
-    ];
-    let get_n_cart = |l: u32, m: u32, n: u32| -> f64 {
-        ((FACT[l as usize] * FACT[m as usize] * FACT[n as usize])
-            / (FACT2[l as usize] * FACT2[m as usize] * FACT2[n as usize]))
-            .sqrt()
-    };
-    use std::f64::consts::PI;
-    let pi_term = 1.0 / PI.sqrt();
-    let sq5 = 5.0_f64.sqrt();
-    let sq35 = 35.0_f64.sqrt();
-    let n_sph: [f64; 9] = [
-        1.5 * pi_term,
-        (3.0 / 8.0) * sq5 * pi_term,
-        (3.0 / 8.0) * sq5 * pi_term,
-        (3.0 / 4.0) * (2.5_f64).sqrt() * pi_term,
-        (3.0 / 4.0) * (2.5_f64).sqrt() * pi_term,
-        (3.0 / 8.0) * sq35 * pi_term,
-        (3.0 / 8.0) * sq35 * pi_term,
-        (3.0 / 16.0) * sq35 * pi_term,
-        (3.0 / 16.0) * sq35 * pi_term,
-    ];
-    let g_polys: [&[(f64, u32, u32, u32)]; 9] = [
+    let g_polys: [&[BasisCompDef]; 9] = [
+        // g(0): (35z^4 - 30z^2 r^2 + 3r^4)/8
         &[
             (1.0, 0, 0, 4),
             (-3.0, 2, 0, 2),
@@ -90,35 +168,32 @@ fn build_g_shell_defs() -> Vec<Vec<BasisCompDef>> {
             (0.375, 0, 4, 0),
             (0.75, 2, 2, 0),
         ],
+        // g(+1): xz(7z^2 - 3r^2)
         &[(4.0, 1, 0, 3), (-3.0, 3, 0, 1), (-3.0, 1, 2, 1)],
+        // g(-1): yz(7z^2 - 3r^2)
         &[(4.0, 0, 1, 3), (-3.0, 0, 3, 1), (-3.0, 2, 1, 1)],
-        &[(6.0, 2, 0, 2), (-6.0, 0, 2, 2), (-1.0, 4, 0, 0), (1.0, 0, 4, 0)],
+        // g(+2): (x^2-y^2)(7z^2 - r^2)
+        &[
+            (6.0, 2, 0, 2),
+            (-6.0, 0, 2, 2),
+            (-1.0, 4, 0, 0),
+            (1.0, 0, 4, 0),
+        ],
+        // g(-2): xy(7z^2 - r^2)
         &[(6.0, 1, 1, 2), (-1.0, 3, 1, 0), (-1.0, 1, 3, 0)],
+        // g(+3): xz(x^2 - 3y^2)
         &[(1.0, 3, 0, 1), (-3.0, 1, 2, 1)],
+        // g(-3): yz(3x^2 - y^2)
         &[(3.0, 2, 1, 1), (-1.0, 0, 3, 1)],
+        // g(+4): x^4 - 6x^2y^2 + y^4
         &[(1.0, 4, 0, 0), (-6.0, 2, 2, 0), (1.0, 0, 4, 0)],
+        // g(-4): xy(x^2 - y^2)
         &[(4.0, 3, 1, 0), (-4.0, 1, 3, 0)],
     ];
-    g_polys
-        .iter()
-        .enumerate()
-        .map(|(i, poly)| {
-            let sph_norm = n_sph[i];
-            poly.iter()
-                .map(|&(c_poly, l, m, n)| {
-                    let n_cart = get_n_cart(l, m, n);
-                    (c_poly * (sph_norm / n_cart), l, m, n)
-                })
-                .collect()
-        })
-        .collect()
+    build_sph_defs(&g_polys)
 }
 
 fn get_basis_definitions(l_type: u32) -> Vec<Vec<BasisCompDef>> {
-    const F0: f64 = 0.240654;
-    const F1: f64 = 0.281160;
-    const F2: f64 = 0.866025;
-    const F3: f64 = 0.369693;
     match l_type {
         0 => vec![vec![(1.0, 0, 0, 0)]],
         1 => vec![
@@ -126,6 +201,8 @@ fn get_basis_definitions(l_type: u32) -> Vec<Vec<BasisCompDef>> {
             vec![(1.0, 1, 0, 0)], // px
             vec![(1.0, 0, 1, 0)], // py
         ],
+        // d components each mix a single normalisation topology, so the
+        // textbook weights are already exact here.
         2 => vec![
             vec![(-0.5, 2, 0, 0), (-0.5, 0, 2, 0), (1.0, 0, 0, 2)],
             vec![(1.0, 1, 0, 1)],
@@ -133,15 +210,7 @@ fn get_basis_definitions(l_type: u32) -> Vec<Vec<BasisCompDef>> {
             vec![(0.866025, 2, 0, 0), (-0.866025, 0, 2, 0)],
             vec![(1.0, 1, 1, 0)],
         ],
-        3 => vec![
-            vec![(2.0 * F0, 0, 0, 3), (-3.0 * F0, 2, 0, 1), (-3.0 * F0, 0, 2, 1)],
-            vec![(4.0 * F1, 1, 0, 2), (-F1, 3, 0, 0), (-F1, 1, 2, 0)],
-            vec![(4.0 * F1, 0, 1, 2), (-F1, 2, 1, 0), (-F1, 0, 3, 0)],
-            vec![(F2, 2, 0, 1), (-F2, 0, 2, 1)],
-            vec![(1.0, 1, 1, 1)],
-            vec![(F3, 3, 0, 0), (-3.0 * F3, 1, 2, 0)],
-            vec![(3.0 * F3, 2, 1, 0), (-F3, 0, 3, 0)],
-        ],
+        3 => build_f_shell_defs(),
         4 => build_g_shell_defs(),
         _ => vec![],
     }
@@ -205,17 +274,31 @@ impl BasisSetEngineRust {
 
             let defs = get_basis_definitions(l_type);
             if defs.is_empty() {
-                eprintln!(
-                    "[BasisSetEngineRust] Warning: unsupported shell type {}",
-                    l_type
-                );
-                continue;
+                // Skipping used to leave start_idx unset and current_idx
+                // unadvanced, so every later shell read the wrong slice of the
+                // MO coefficient vector — a silently wrong orbital with
+                // nothing on screen to say so. Refuse the basis set instead.
+                const SHELL_LETTERS: [&str; 8] = ["S", "P", "D", "F", "G", "H", "I", "K"];
+                let letter = SHELL_LETTERS
+                    .get(l_type as usize)
+                    .map(|s| format!("{} shells", s))
+                    .unwrap_or_else(|| format!("l={} shells", l_type));
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "This basis set contains {}, which the orbital renderer                      does not support (S through G only).
+
+Visualization is                      blocked rather than showing an orbital that would be                      silently incorrect.",
+                    letter
+                )));
             }
 
             // Distance cutoff: skip shell when exp(-alpha_min * r2) < 1e-15
             // => r2 > 34.539 / alpha_min
             let alpha_min = exps.iter().cloned().fold(f64::INFINITY, f64::min);
-            let r2_cut = if alpha_min > 0.0 { 34.539 / alpha_min } else { f64::INFINITY };
+            let r2_cut = if alpha_min > 0.0 {
+                34.539 / alpha_min
+            } else {
+                f64::INFINITY
+            };
 
             let mut basis_funcs = Vec::new();
             for bf_def in &defs {
@@ -226,7 +309,12 @@ impl BasisSetEngineRust {
                         .zip(coeffs.iter())
                         .map(|(&a, &c)| c * normalization_prefactor(a, l, m, n) * weight)
                         .collect();
-                    components.push(MoComponent { l, m, n, coeffs: comp_coeffs });
+                    components.push(MoComponent {
+                        l,
+                        m,
+                        n,
+                        coeffs: comp_coeffs,
+                    });
                 }
                 basis_funcs.push(MoBasisFunc { components });
             }
@@ -244,7 +332,10 @@ impl BasisSetEngineRust {
             current_idx += n_funcs;
         }
 
-        Ok(BasisSetEngineRust { shells, n_basis_val: current_idx })
+        Ok(BasisSetEngineRust {
+            shells,
+            n_basis_val: current_idx,
+        })
     }
 
     /// Number of basis functions (must match the MO coefficient vector length).
@@ -315,9 +406,8 @@ impl BasisSetEngineRust {
                                     .zip(exp_buf.iter())
                                     .map(|(c, e)| c * e)
                                     .sum();
-                                let ang = ang_pow(rx, comp.l)
-                                    * ang_pow(ry, comp.m)
-                                    * ang_pow(rz, comp.n);
+                                let ang =
+                                    ang_pow(rx, comp.l) * ang_pow(ry, comp.m) * ang_pow(rz, comp.n);
                                 val_accum += ang * contracted;
                             }
                             phi += c_mo * val_accum;

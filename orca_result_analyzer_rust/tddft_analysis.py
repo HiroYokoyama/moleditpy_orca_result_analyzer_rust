@@ -28,9 +28,15 @@ except ImportError:
         from spectrum_widget import SpectrumWidget
     except Exception:
         SpectrumWidget = None
-from .utils import get_default_export_path
+from .utils import get_default_export_path, save_json_atomic
 import datetime
 import logging
+
+#: SpectrumWidget's lineshape is exp(-((x-x0)/sigma)^2), whose full width at
+#: half maximum is 2*sqrt(ln 2)*sigma. The familiar 2.355 (=2*sqrt(2 ln 2))
+#: belongs to the exp(-(x-x0)^2/(2 sigma^2)) form instead, and using it here
+#: made every band a factor of sqrt(2) narrower than the requested FWHM.
+FWHM_TO_SIGMA = 1.6651092223153954
 
 
 class TDDFTDialog(QDialog):
@@ -370,6 +376,10 @@ class TDDFTDialog(QDialog):
         energy_cm = item.get("energy_cm", 0.0) or 0.0
         if energy_cm <= 0 and energy_nm > 0:
             energy_cm = 1e7 / energy_nm
+        if energy_ev <= 0 and energy_nm > 0:
+            # hc/e in eV*nm; the export path already did this, so the detail
+            # panel used to be the only place showing "0.0000 eV".
+            energy_ev = 1239.84193 / energy_nm
 
         is_cd = self.radio_cd.isChecked()
         gauge_mode = self.combo_gauge.currentIndex()  # 0: Length, 1: Velocity
@@ -490,9 +500,15 @@ class TDDFTDialog(QDialog):
 
     # ── Existing methods (unchanged logic, dialog removed) ──────────────────
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         self.save_settings()
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
@@ -538,7 +554,7 @@ class TDDFTDialog(QDialog):
         if unit_idx == 1:  # eV
             fwhm_cm = val * 8065.544
 
-        self.spectrum.sigma = fwhm_cm / 2.355
+        self.spectrum.sigma = fwhm_cm / FWHM_TO_SIGMA
         self.spectrum.broaden_in_energy = True
         self.spectrum.update()
 
@@ -584,8 +600,7 @@ class TDDFTDialog(QDialog):
 
         try:
             os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            save_json_atomic(self.settings_file, all_settings)
 
             if self.parent() and self.parent().context:
                 self.parent().context.show_status_message("TDDFT settings saved.", 3000)

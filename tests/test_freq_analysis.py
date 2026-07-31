@@ -333,10 +333,18 @@ def _install_stubs():
     _ut = types.ModuleType("orca_result_analyzer_rust.utils")
     _ut.get_default_export_path = MagicMock(return_value="")
     _ut.clear_atom_color_overrides = MagicMock()
+    _ut.save_json_atomic = MagicMock()
 
-    # PIL stub
-    _pil = types.ModuleType("PIL")
-    _pil.Image = MagicMock
+    # PIL stub — fallback only. This lands in the shared sys.modules for the
+    # rest of the session, and matplotlib's Agg backend does
+    # `from PIL import features` when it resolves a renderer (figure
+    # .tight_layout()), which a stub exposing only .Image cannot satisfy.
+    # Keep the real Pillow whenever it is importable.
+    try:
+        import PIL as _pil  # noqa: F401
+    except ImportError:
+        _pil = types.ModuleType("PIL")
+        _pil.Image = MagicMock
 
     # rdkit stub (only if not already installed)
     try:

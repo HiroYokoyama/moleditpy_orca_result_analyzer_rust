@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 
@@ -18,6 +19,20 @@ def get_default_export_path(base_path, suffix="_analyzed", extension=""):
     filename_base = os.path.splitext(os.path.basename(base_path))[0]
     new_filename = f"{filename_base}{suffix}{extension}"
     return os.path.join(dirname, new_filename)
+
+
+def save_json_atomic(path, data, indent=2):
+    """Write *data* as JSON via a temp file + ``os.replace``.
+
+    A direct ``open(path, "w")`` truncates the file first, so a crash or
+    I/O error mid-write destroys the previous contents (saved NMR merges,
+    dialog settings). Writing to a sibling temp file and atomically
+    replacing keeps the old file intact until the new one is complete.
+    """
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent)
+    os.replace(tmp_path, path)
 
 
 def normalize_atom_symbol(raw: str) -> str:

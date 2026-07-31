@@ -26,7 +26,6 @@ class DipoleDialog(QDialog):
         self.parent_dlg = parent_dlg
         self.dipole_data = dipole_data
         self.arrow_actor = None
-        self.arrow_actor = None
         self.arrow_color = "cyan"
         self.arrow_res = 20
         self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
@@ -36,14 +35,24 @@ class DipoleDialog(QDialog):
         # 1. Info Section
         info_group = QGroupBox("Dipole Data")
         info_layout = QVBoxLayout(info_group)
-        vec = dipole_data.get("vector", [0.0, 0.0, 0.0])
-        mag = dipole_data.get("magnitude", 0.0)
+        vec = dipole_data.get(
+            "vector_debye", dipole_data.get("vector", [0.0, 0.0, 0.0])
+        )
+        mag = dipole_data.get("magnitude_debye", dipole_data.get("magnitude", 0.0))
+        vec_au = dipole_data.get("vector_au", None)
+        mag_au = dipole_data.get("magnitude_au", None)
 
         info_text = (
             f"Vector (X, Y, Z):<br>"
             f"<b>{vec[0]:.4f}, {vec[1]:.4f}, {vec[2]:.4f}</b> Debye<br><br>"
             f"Magnitude: <b>{mag:.4f} Debye</b>"
         )
+        if vec_au is not None and mag_au is not None:
+            info_text += (
+                f"<br><br><span style='color:#666;'>"
+                f"a.u.: {vec_au[0]:.5f}, {vec_au[1]:.5f}, {vec_au[2]:.5f}"
+                f" &nbsp;(|μ| = {mag_au:.5f})</span>"
+            )
         lbl_info = QLabel(info_text)
         lbl_info.setWordWrap(True)
         info_layout.addWidget(lbl_info)
@@ -120,14 +129,20 @@ class DipoleDialog(QDialog):
 
         try:
             mw = self.parent_dlg.mw
-            # Center of mass calculation
+            # Geometric centroid — only the arrow's anchor point. For a neutral
+            # molecule the dipole is origin-independent, so this is cosmetic.
             coords = self.parent_dlg.parser.data.get("coords", [])
             if coords:
                 center = np.mean(coords, axis=0)
             else:
                 center = np.array([0.0, 0.0, 0.0])
 
-            vec = np.array(self.dipole_data.get("vector", [0.0, 0.0, 0.0]))
+            # Debye throughout, so the arrow length matches the number shown.
+            vec = np.array(
+                self.dipole_data.get(
+                    "vector_debye", self.dipole_data.get("vector", [0.0, 0.0, 0.0])
+                )
+            )
             mag = np.linalg.norm(vec)
 
             if mag < 1e-6:
@@ -169,6 +184,10 @@ class DipoleDialog(QDialog):
         self.arrow_res = val
         self.update_view()
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         if self.arrow_actor:
             try:
@@ -176,7 +195,6 @@ class DipoleDialog(QDialog):
                 self.parent_dlg.mw.plotter.render()
             except Exception as _e:
                 logging.warning("silenced: %s", _e)
-        # Clean up reference in parent
         # Clean up reference in parent
         if hasattr(self.parent_dlg, "dipole_dlg"):
             self.parent_dlg.dipole_dlg = None
@@ -221,7 +239,9 @@ class DipoleDialog(QDialog):
                     all_settings = json.load(f)
             except Exception:
                 # settings file may be empty or corrupt; start fresh
-                logging.debug("Could not read settings file; starting fresh", exc_info=True)
+                logging.debug(
+                    "Could not read settings file; starting fresh", exc_info=True
+                )
 
         dipole_settings = {
             # "scale": self.spin_scale.value(),
@@ -234,7 +254,8 @@ class DipoleDialog(QDialog):
         all_settings["dipole_settings"] = dipole_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            from .utils import save_json_atomic
+
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving dipole settings: %s", e)

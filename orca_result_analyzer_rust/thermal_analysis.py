@@ -21,7 +21,6 @@ class ThermalTableDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Thermochemistry")
         self.resize(550, 460)
-        self.resize(550, 460)
         self.data = data
         self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -57,9 +56,15 @@ class ThermalTableDialog(QDialog):
         self.update_table()
         self.load_settings()
 
+    def reject(self):
+        # Esc must run closeEvent cleanup (QDialog.reject only hides)
+        self.close()
+
     def closeEvent(self, event):
         self.save_settings()
-        super().closeEvent(event)
+        # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
+        # which is routed back through close() and would recurse.
+        event.accept()
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
@@ -88,8 +93,9 @@ class ThermalTableDialog(QDialog):
         all_settings["thermal_settings"] = thermal_settings
 
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(all_settings, f, indent=2)
+            from .utils import save_json_atomic
+
+            save_json_atomic(self.settings_file, all_settings)
         except Exception as e:
             logging.warning("Error saving thermal settings: %s", e)
 

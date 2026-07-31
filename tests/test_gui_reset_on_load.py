@@ -159,9 +159,7 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
 
     def test_load_file_calls_clear_atom_color_overrides(self):
         dlg = self._make_dialog()
-        with patch(
-            "orca_result_analyzer_rust.gui.clear_atom_color_overrides"
-        ) as mock_clear:
+        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
             # Path need not exist: the reset call happens before file I/O,
             # and any read failure is caught internally by load_file().
             dlg.load_file("/nonexistent/path/calc.out")
@@ -170,9 +168,7 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
     def test_load_file_clears_overrides_even_on_read_failure(self):
         """A missing/unreadable file must not skip the override reset."""
         dlg = self._make_dialog()
-        with patch(
-            "orca_result_analyzer_rust.gui.clear_atom_color_overrides"
-        ) as mock_clear:
+        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
             try:
                 dlg.load_file("/definitely/does/not/exist.out")
             except Exception as exc:  # load_file must swallow read errors
@@ -182,12 +178,69 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
     def test_load_file_clears_before_closing_sub_dialogs_is_also_called(self):
         """Both cleanup steps must run on every load, in the same call."""
         dlg = self._make_dialog()
-        with patch(
-            "orca_result_analyzer_rust.gui.clear_atom_color_overrides"
-        ) as mock_clear:
+        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
             dlg.load_file("/nonexistent/path/calc.out")
             dlg.close_all_sub_dialogs.assert_called_once()
             mock_clear.assert_called_once()
+
+
+class TestCloseDeregistersTheWindow(unittest.TestCase):
+    """Closing must drop the window from the host registry.
+
+    Plotter picking is installed once, in __init__, and removed in
+    closeEvent. A window left registered gets re-shown by the Extensions
+    menu instead of rebuilt, so its event filter is never reinstalled and
+    atom clicks stay dead for the rest of the session.
+    """
+
+    def _make_dialog(self, ctx):
+        return OrcaResultAnalyzerDialog(None, OrcaParser(), "", ctx)
+
+    def test_close_event_deregisters(self):
+        ctx = MagicMock()
+        dlg = self._make_dialog(ctx)
+        dlg.closeEvent(MagicMock())
+        ctx.register_window.assert_called_with("analyzer", None)
+
+    def test_close_event_still_removes_the_picking_filter(self):
+        dlg = self._make_dialog(MagicMock())
+        dlg._disable_plotter_picking = MagicMock()
+        dlg.closeEvent(MagicMock())
+        dlg._disable_plotter_picking.assert_called_once()
+
+    def test_close_event_accepts_the_event(self):
+        dlg = self._make_dialog(MagicMock())
+        evt = MagicMock()
+        dlg.closeEvent(evt)
+        evt.accept.assert_called_once()
+
+    def test_a_registry_failure_does_not_block_the_close(self):
+        ctx = MagicMock()
+        ctx.register_window.side_effect = RuntimeError("registry gone")
+        dlg = self._make_dialog(ctx)
+        evt = MagicMock()
+        dlg.closeEvent(evt)  # must not raise
+        evt.accept.assert_called_once()
+
+    def test_close_without_a_context_is_harmless(self):
+        dlg = self._make_dialog(None)
+        evt = MagicMock()
+        dlg.closeEvent(evt)
+        evt.accept.assert_called_once()
+
+    def test_the_registry_reads_back_empty_after_a_close(self):
+        """The precondition _open_orca_analyzer_empty() branches on."""
+        registry = {}
+        ctx = MagicMock()
+        ctx.register_window.side_effect = lambda k, w: registry.__setitem__(k, w)
+        ctx.get_window.side_effect = lambda k: registry.get(k)
+
+        dlg = self._make_dialog(ctx)
+        ctx.register_window("analyzer", dlg)
+        self.assertIs(ctx.get_window("analyzer"), dlg)
+
+        dlg.closeEvent(MagicMock())
+        self.assertIsNone(ctx.get_window("analyzer"))
 
 
 if __name__ == "__main__":
