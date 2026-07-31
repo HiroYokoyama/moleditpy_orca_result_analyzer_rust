@@ -32,6 +32,31 @@ after copying dialog modules verify the seam names still resolve
 (`utils.get_default_export_path`, `vis.CubeVisualizer`,
 `energy_diag.EnergyDiagramDialog`, `mo_engine.BasisSetEngine`/`CalcWorker`).
 
+### Before touching the shell definitions in `crates/orca_mo_rs/`
+
+Read **`../moleditpy_orca_result_analyzer_plugin/docs/MO_CALCULATION.md`**.
+The crate's `build_sph_defs` is the same derivation as the Python engine's,
+and for the same reason: a mis-normalized basis function still renders as a
+plausible orbital — right symmetry, right signs, lobes roughly in place — so
+a change there **cannot be verified by looking at the picture**. It carried
+hand-typed f and g prefactor tables that were wrong for a long time without
+anyone noticing.
+
+Verify numerically instead (`tests/test_mo_engine_shells.py` does all three):
+cosine similarity 1.000000 against `scipy.special.sph_harm_y`, unit norm per
+component, and the closed-form nodal angles (f(z³) 39.23°, g(z⁴)
+30.56°/70.12°).
+
+### Checking parser parity against the Python plugin
+
+The two parsers must produce the same `self.data`. To check, load a sample
+with both and diff the dicts key by key — that is how the missing
+`mayer_bond_orders` / `termination_status` / `dispersion` /
+`energy_components` blocks and the truncated SCF traces were found, none of
+which any test was asserting. Known-benign differences: `all_steps` (Rust
+populates it for optimisations), and the tie-break order of degenerate TD-DFT
+states and scan-step sub-entries.
+
 ## Build (required before tests/use)
 
 ```bash
