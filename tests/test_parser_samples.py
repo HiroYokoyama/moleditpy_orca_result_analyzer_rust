@@ -1127,8 +1127,22 @@ class TestRelaxedSurfaceScan(unittest.TestCase):
         self.assertEqual(len(scan_steps), 5)
 
     def test_total_trajectory_steps(self):
-        """Should have 37 total steps in the trajectory (scan steps + intermediate opt cycles)."""
-        self.assertEqual(len(self.p.data.get("scan_steps", [])), 37)
+        """41 = 5 scan_step + 31 opt_cycle + 5 opt_final.
+
+        Was 37: the opt_final (converged geometry) entry was emitted only
+        once for the whole file instead of once per scan point, so four
+        scan steps lost their final frame.
+        """
+        self.assertEqual(len(self.p.data.get("scan_steps", [])), 41)
+
+    def test_every_scan_step_has_a_final_geometry(self):
+        finals = [
+            s for s in self.p.data.get("scan_steps", []) if s["type"] == "opt_final"
+        ]
+        self.assertEqual(len(finals), 5)
+        self.assertEqual(
+            sorted(s["scan_step_id"] for s in finals), [1, 2, 3, 4, 5]
+        )
 
     def test_scan_step_coords_and_energies(self):
         scan_steps = [s for s in self.p.data.get("scan_steps", []) if s["type"] == "scan_step"]

@@ -25,8 +25,22 @@ const IMAGINARY_FREQ_THRESHOLD: f64 = 10.0;
 
 static RE_FLOAT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+\.?").unwrap());
+/// "[file /path/foo.cpp, line 123]" — an ORCA error signature.
+static RE_FILE_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\[file\s+[^,\]]+,\s*line\s*\d+\]").unwrap());
+static RE_DISPERSION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"Dispersion correction\s+(-?\d+\.\d+(?:[eE][-+]?\d+)?)").unwrap());
+static RE_MAYER_BOND: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"B\(\s*(\d+)-(\w+)\s*,\s*(\d+)-(\w+)\s*\)\s*:\s*(-?\d+\.\d+)").unwrap()
+});
+/// Plain decimal float — no bare-integer alternative, matching the Python
+/// energy-component scan.
+static RE_PLAIN_FLOAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[-+]?\d+\.\d+").unwrap());
+/// The label must be a whole word: without \b the trailing "e" of a preceding
+/// word (e.g. "Coordinate 1.2") matches the bare-"E" alternative
+/// case-insensitively and steals the wrong number as the energy.
 static RE_ENERGY_LABEL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(?:Energy|E)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)\b(?:Energy|E)\b[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)").unwrap());
 static RE_DIST_LABEL: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)")
         .unwrap()
@@ -139,6 +153,27 @@ struct ParsedData {
     gradients: Vec<Gradient>,
     basis_set_shells: Vec<BasisShell>,
     mo_coeffs: HashMap<String, MoCoeff>,
+
+    termination_status: String,
+    dispersion: Option<f64>,
+    mayer_bond_orders: Vec<MayerBond>,
+    energy_components: Vec<EnergyComponent>,
+}
+
+#[derive(Clone)]
+struct MayerBond {
+    atom_idx1: i32,
+    atom_sym1: String,
+    atom_idx2: i32,
+    atom_sym2: String,
+    order: f64,
+}
+
+#[derive(Clone)]
+struct EnergyComponent {
+    label: String,
+    value: f64,
+    dimensionless: bool,
 }
 
 #[derive(Default, Clone)]
@@ -336,6 +371,10 @@ impl<'a> OrcaRustParser<'a> {
         self.parse_basis_set(&mut data);
         self.parse_scf_trace(&mut data);
         self.parse_scan_results_table(&mut data);
+        self.parse_termination_status(&mut data);
+        self.parse_dispersion(&mut data);
+        self.parse_mayer_bond_orders(&mut data);
+        self.parse_energy_components(&mut data);
         data
     }
 
@@ -802,47 +841,47 @@ impl<'a> OrcaRustParser<'a> {
                         gradients: step_grads,
                     });
                 }
-            }
-        }
-
-        // Append "opt_final" step from FINAL ENERGY EVALUATION AT THE STATIONARY POINT
-        let final_eval_idx = self.lines.iter().position(|l| {
-            l.to_uppercase()
-                .contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
-        });
-        if let Some(i) = final_eval_idx {
-            let mut final_en = 0.0_f64;
-            for k in i..self.len().min(i + 1500) {
-                let uu_k = self.get(k).to_uppercase();
-                if uu_k.contains("FINAL SINGLE POINT ENERGY") {
-                    if let Some(v) = self.get(k).split_whitespace().last().and_then(parse_f64) {
-                        final_en = v;
+            } else if uu_line.contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT") {
+                // Handled inside the loop, not once via position(): a relaxed
+                // scan prints this marker per scan point, and matching only
+                // the first dropped the converged geometry of every scan step
+                // but the last.
+                let mut final_en = 0.0_f64;
+                for k in i..self.len().min(i + 1500) {
+                    let uu_k = self.get(k).to_uppercase();
+                    if uu_k.contains("FINAL SINGLE POINT ENERGY") {
+                        if let Some(v) = self.get(k).split_whitespace().last().and_then(parse_f64) {
+                            final_en = v;
+                        }
+                        break;
                     }
-                    break;
                 }
-            }
-            let (f_atoms, f_coords, f_found) = self.read_coords_from(i);
-            if f_found {
-                let last_cycle = data
-                    .scan_steps
-                    .iter()
-                    .filter(|s| s.step_type == "opt_cycle")
-                    .map(|s| s.step)
-                    .max()
-                    .unwrap_or(0);
-                let current_scan_step = data.scan_steps.last().and_then(|s| s.scan_step_id);
-                data.scan_steps.push(ScanStep {
-                    step_type: "opt_final".to_string(),
-                    scan_step_id: current_scan_step,
-                    step: last_cycle + 1,
-                    energy: final_en,
-                    scan_coord: None,
-                    dist: None,
-                    atoms: f_atoms,
-                    coords: f_coords,
-                    convergence: HashMap::new(),
-                    gradients: Vec::new(),
-                });
+                let (f_atoms, f_coords, f_found) = self.read_coords_from(i);
+                if f_found {
+                    // Numbering continues that scan step's own cycles, not the
+                    // global maximum.
+                    let last_cycle = data
+                        .scan_steps
+                        .iter()
+                        .filter(|s| {
+                            s.step_type == "opt_cycle" && s.scan_step_id == current_scan_step
+                        })
+                        .map(|s| s.step)
+                        .max()
+                        .unwrap_or(0);
+                    data.scan_steps.push(ScanStep {
+                        step_type: "opt_final".to_string(),
+                        scan_step_id: current_scan_step,
+                        step: last_cycle + 1,
+                        energy: final_en,
+                        scan_coord: None,
+                        dist: None,
+                        atoms: f_atoms,
+                        coords: f_coords,
+                        convergence: HashMap::new(),
+                        gradients: Vec::new(),
+                    });
+                }
             }
         }
     }
@@ -1687,29 +1726,32 @@ impl<'a> OrcaRustParser<'a> {
                     }
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 5 {
+                        // Labels are normally "0-C", but some builds print a
+                        // bare symbol. Requiring the '-' dropped those rows
+                        // entirely; fall back to the row's position for the
+                        // index, as the Python parser does.
                         let atom_lbl = parts[0];
-                        if atom_lbl.contains('-') {
-                            let sub: Vec<&str> = atom_lbl.splitn(2, '-').collect();
-                            if sub.len() == 2 {
-                                if let (Some(idx), Some(hm), Some(hl), Some(lm), Some(ll)) = (
-                                    parse_i32(sub[0]),
-                                    parse_f64(parts[1]),
-                                    parse_f64(parts[2]),
-                                    parse_f64(parts[3]),
-                                    parse_f64(parts[4]),
-                                ) {
-                                    fmo_data.push(ChargeEntry {
-                                        atom_idx: idx,
-                                        atom_sym: sub[1].to_string(),
-                                        charge: hm,
-                                        homo_mulliken: Some(hm),
-                                        homo_loewdin: Some(hl),
-                                        lumo_mulliken: Some(lm),
-                                        lumo_loewdin: Some(ll),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
+                        let (idx, sym) = match atom_lbl.split_once('-') {
+                            Some((i, s)) => (parse_i32(i), s.to_string()),
+                            None => (Some(fmo_data.len() as i32), atom_lbl.to_string()),
+                        };
+                        if let (Some(idx), Some(hm), Some(hl), Some(lm), Some(ll)) = (
+                            idx,
+                            parse_f64(parts[1]),
+                            parse_f64(parts[2]),
+                            parse_f64(parts[3]),
+                            parse_f64(parts[4]),
+                        ) {
+                            fmo_data.push(ChargeEntry {
+                                atom_idx: idx,
+                                atom_sym: sym,
+                                charge: hm,
+                                homo_mulliken: Some(hm),
+                                homo_loewdin: Some(hl),
+                                lumo_mulliken: Some(lm),
+                                lumo_loewdin: Some(ll),
+                                ..Default::default()
+                            });
                         }
                     }
                     curr += 1;
@@ -1719,6 +1761,159 @@ impl<'a> OrcaRustParser<'a> {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_termination_status
+    // -----------------------------------------------------------------------
+    fn parse_termination_status(&self, data: &mut ParsedData) {
+        data.termination_status = "Running".to_string();
+        if self.lines.is_empty() {
+            return;
+        }
+        let start = self.len().saturating_sub(100);
+        let block: String = self.lines[start..].join(
+            "
+",
+        );
+        let uu = block.to_uppercase();
+
+        if uu.contains("ORCA TERMINATED NORMALLY") {
+            data.termination_status = "Terminated normally".to_string();
+            return;
+        }
+        if uu.contains("ORCA FINISHED BY ERROR TERMINATION")
+            || uu.contains("INPUT ERROR")
+            || uu.contains("ERROR !!!")
+            || uu.contains("ORCA FINISHED WITH ERROR RETURN")
+            || RE_FILE_LINE.is_match(&block)
+        {
+            data.termination_status = "ERROR".to_string();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_dispersion
+    // -----------------------------------------------------------------------
+    /// London dispersion correction (DFT-D3/D4), in Eh. Case-sensitive so the
+    /// prose line "... London dispersion correction" does not match. Last
+    /// occurrence wins.
+    fn parse_dispersion(&self, data: &mut ParsedData) {
+        data.dispersion = None;
+        for line in &self.lines {
+            if let Some(c) = RE_DISPERSION.captures(line) {
+                if let Some(v) = c.get(1).and_then(|m| parse_f64(m.as_str())) {
+                    data.dispersion = Some(v);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_mayer_bond_orders
+    // -----------------------------------------------------------------------
+    /// "B(  0-C ,  1-C ) :   1.3925 B(  0-C ,  5-C ) :   1.3924 ..."
+    /// Stored with atom_idx1 < atom_idx2 (0-based). Last block wins.
+    fn parse_mayer_bond_orders(&self, data: &mut ParsedData) {
+        data.mayer_bond_orders.clear();
+        let mut start: Option<usize> = None;
+        for (i, line) in self.lines.iter().enumerate() {
+            if line.contains("Mayer bond orders") {
+                start = Some(i);
+            }
+        }
+        let start = match start {
+            Some(s) => s,
+            None => return,
+        };
+
+        let mut bonds: Vec<MayerBond> = Vec::new();
+        for j in (start + 1)..self.len() {
+            let line = self.get(j);
+            if line.trim().is_empty() {
+                break;
+            }
+            let mut matched = false;
+            for c in RE_MAYER_BOND.captures_iter(line) {
+                matched = true;
+                let (i1, s1, i2, s2, ord) = (
+                    c.get(1).and_then(|m| m.as_str().parse::<i32>().ok()),
+                    c.get(2).map(|m| m.as_str().to_string()),
+                    c.get(3).and_then(|m| m.as_str().parse::<i32>().ok()),
+                    c.get(4).map(|m| m.as_str().to_string()),
+                    c.get(5).and_then(|m| parse_f64(m.as_str())),
+                );
+                if let (Some(i1), Some(s1), Some(i2), Some(s2), Some(ord)) = (i1, s1, i2, s2, ord) {
+                    let (a1, sy1, a2, sy2) = if i1 > i2 {
+                        (i2, s2, i1, s1)
+                    } else {
+                        (i1, s1, i2, s2)
+                    };
+                    bonds.push(MayerBond {
+                        atom_idx1: a1,
+                        atom_sym1: sy1,
+                        atom_idx2: a2,
+                        atom_sym2: sy2,
+                        order: ord,
+                    });
+                }
+            }
+            if !matched && !bonds.is_empty() {
+                break;
+            }
+        }
+        data.mayer_bond_orders = bonds;
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_energy_components
+    // -----------------------------------------------------------------------
+    /// Post-HF correlation components (MP2 / CCSD(T) / ...). Matching is
+    /// case-sensitive so DLPNO's "SL-MP2 correlation energy" intermediates do
+    /// not collide with the canonical labels. Last occurrence of each wins,
+    /// and output order follows the spec table.
+    fn parse_energy_components(&self, data: &mut ParsedData) {
+        const SPECS: [(&str, &str, bool); 9] = [
+            ("E(0)", "Reference energy E(0)", false),
+            ("MP2 CORRELATION ENERGY", "MP2 correlation energy", false),
+            ("MP2 TOTAL ENERGY", "MP2 total energy", false),
+            ("E(CORR)(corrected)", "CCSD correlation energy", false),
+            ("Triples Correction (T)", "(T) triples correction", false),
+            (
+                "Final correlation energy",
+                "Total correlation energy",
+                false,
+            ),
+            ("E(CCSD)", "E(CCSD)", false),
+            ("E(CCSD(T))", "E(CCSD(T))", false),
+            ("T1 diagnostic", "T1 diagnostic", true),
+        ];
+        let mut found: HashMap<&str, (f64, bool)> = HashMap::new();
+        for line in &self.lines {
+            for (sub, label, dimensionless) in SPECS.iter() {
+                if line.contains(sub) {
+                    if let Some(v) = RE_PLAIN_FLOAT
+                        .find_iter(line)
+                        .last()
+                        .and_then(|m| parse_f64(m.as_str()))
+                    {
+                        found.insert(label, (v, *dimensionless));
+                    }
+                }
+            }
+        }
+        data.energy_components = SPECS
+            .iter()
+            .filter_map(|(_, label, _)| {
+                found
+                    .get(label)
+                    .map(|&(value, dimensionless)| EnergyComponent {
+                        label: label.to_string(),
+                        value,
+                        dimensionless,
+                    })
+            })
+            .collect();
     }
 
     // -----------------------------------------------------------------------
@@ -2318,8 +2513,12 @@ impl<'a> OrcaRustParser<'a> {
 
                     while idx < self.len() {
                         let l_scf = self.get(idx).trim();
+                        // No "---" here: a run that switches DIIS -> SOSCF
+                        // prints a separator mid-block, and breaking on it
+                        // truncated the trace at the switch (5 of 8
+                        // iterations on benzene-opt-ene). Non-numeric lines
+                        // are skipped below anyway.
                         if l_scf.is_empty()
-                            || l_scf.contains("---")
                             || l_scf.contains("SUCCESS")
                             || l_scf.contains("Energy Check")
                         {
@@ -2574,7 +2773,10 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
     d.set_item("charge", data.charge)?;
     d.set_item("mult", data.mult)?;
     d.set_item("version", data.version.clone().into_py(py))?;
-    d.set_item("is_scan", data.is_scan)?;
+    // Only emitted when true, matching the Python parser (absent otherwise).
+    if data.is_scan {
+        d.set_item("is_scan", true)?;
+    }
     d.set_item("is_neb", data.is_neb)?;
     d.set_item("neb_trj_file", data.neb_trj_file.clone().into_py(py))?;
 
@@ -2695,6 +2897,43 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
     }
     d.set_item("charges", charges_dict)?;
 
+    // termination status / dispersion / mayer / energy components
+    d.set_item("termination_status", &data.termination_status)?;
+    match data.dispersion {
+        Some(v) => d.set_item("dispersion", v)?,
+        None => d.set_item("dispersion", py.None())?,
+    }
+
+    let mayer_list = PyList::empty_bound(py);
+    for b in &data.mayer_bond_orders {
+        let bd = PyDict::new_bound(py);
+        bd.set_item("atom_idx1", b.atom_idx1)?;
+        bd.set_item("atom_sym1", &b.atom_sym1)?;
+        bd.set_item("atom_idx2", b.atom_idx2)?;
+        bd.set_item("atom_sym2", &b.atom_sym2)?;
+        bd.set_item("order", b.order)?;
+        mayer_list.append(bd)?;
+    }
+    d.set_item("mayer_bond_orders", mayer_list)?;
+
+    let ec_list = PyList::empty_bound(py);
+    for c in &data.energy_components {
+        let cd = PyDict::new_bound(py);
+        cd.set_item("label", &c.label)?;
+        cd.set_item("value", c.value)?;
+        cd.set_item("dimensionless", c.dimensionless)?;
+        ec_list.append(cd)?;
+    }
+    d.set_item("energy_components", ec_list)?;
+
+    // NBO blocks are not parsed by the Rust engine; expose empty lists so the
+    // shared dialogs see the same shape as the Python parser rather than a
+    // missing key.
+    // nbo_hybrids is deliberately absent: the Python parser only sets it when
+    // an NBO block exists, and the dialogs use .get() on all three.
+    d.set_item("nbo_orbitals", PyList::empty_bound(py))?;
+    d.set_item("nbo_perturbation", PyList::empty_bound(py))?;
+
     // dipole
     match &data.dipole {
         None => {
@@ -2709,25 +2948,14 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
             } else {
                 AU_TO_DEBYE
             };
+            let debye = [dip.x * to_debye, dip.y * to_debye, dip.z * to_debye];
             let dd = PyDict::new_bound(py);
-            dd.set_item("vector_au", PyList::new_bound(py, &[dip.x, dip.y, dip.z]))?;
-            dd.set_item(
-                "vector_debye",
-                PyList::new_bound(
-                    py,
-                    &[dip.x * to_debye, dip.y * to_debye, dip.z * to_debye],
-                ),
-            )?;
+            dd.set_item("vector_au", PyList::new_bound(py, [dip.x, dip.y, dip.z]))?;
+            dd.set_item("vector_debye", PyList::new_bound(py, debye))?;
             dd.set_item("magnitude_au", dip.magnitude_au)?;
             dd.set_item("magnitude_debye", dip.magnitude_debye)?;
             // Back-compat aliases (Debye, matching the UI labels).
-            dd.set_item(
-                "vector",
-                PyList::new_bound(
-                    py,
-                    &[dip.x * to_debye, dip.y * to_debye, dip.z * to_debye],
-                ),
-            )?;
+            dd.set_item("vector", PyList::new_bound(py, debye))?;
             dd.set_item("magnitude", dip.magnitude_debye)?;
             d.set_item("dipole", &dd)?;
             d.set_item("dipoles", dd)?;

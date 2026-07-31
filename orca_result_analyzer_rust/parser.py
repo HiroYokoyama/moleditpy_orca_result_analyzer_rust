@@ -12,6 +12,15 @@ and analysis modules work without modification.
 import logging
 import os
 
+#: 1 atomic unit of electric dipole moment (e*a0) in Debye.
+#: Mirrors the Python plugin's module constant — part of the drop-in surface,
+#: and the crate keeps its own copy in sync.
+AU_TO_DEBYE = 2.541746473
+
+#: Modes below this magnitude are translations/rotations or numerical noise,
+#: not genuine imaginary frequencies (cm^-1).
+IMAGINARY_FREQ_THRESHOLD = 10.0
+
 try:
     from . import orca_parser_rs as _rs
     _RUST_AVAILABLE = True

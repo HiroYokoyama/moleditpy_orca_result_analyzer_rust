@@ -26,6 +26,7 @@ def _load_parser():
 
 _parser_mod = _load_parser()
 OrcaParser = _parser_mod.OrcaParser
+AU_TO_DEBYE = _parser_mod.AU_TO_DEBYE
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +272,22 @@ class TestParseDipole(unittest.TestCase):
         self.assertAlmostEqual(p.data["dipole"]["magnitude"], 1.24074, places=4)
 
     def test_magnitude_calculated_if_no_line(self):
+        """With no Magnitude line the a.u. magnitude is the vector norm, and
+        the Debye magnitude is that times the conversion constant.
+
+        "magnitude" is a Debye alias, so it is NOT the a.u. norm — asserting
+        that was the pre-v3.11.0 contract, when components and magnitude were
+        allowed to sit on different scales.
+        """
         import math
         p = _parse_method(_DIPOLE_NO_MAG_LINE, "parse_dipole")
-        expected = math.sqrt(0.0 + 0.0 + 1.85468**2)
-        self.assertAlmostEqual(p.data["dipole"]["magnitude"], expected, places=4)
+        norm_au = math.sqrt(0.0 + 0.0 + 1.85468**2)
+        d = p.data["dipole"]
+        self.assertAlmostEqual(d["magnitude_au"], norm_au, places=4)
+        self.assertAlmostEqual(
+            d["magnitude_debye"], norm_au * AU_TO_DEBYE, places=4
+        )
+        self.assertAlmostEqual(d["magnitude"], d["magnitude_debye"], places=6)
 
     def test_no_dipole(self):
         p = _parse_method("  FINAL SINGLE POINT ENERGY   -76.0\n", "parse_dipole")
@@ -286,7 +299,12 @@ class TestParseDipole(unittest.TestCase):
             "Total Dipole Moment    :    0.00000   0.00000   1.23456\n"
         )
         p = _parse_method(content, "parse_dipole")
-        self.assertAlmostEqual(p.data["dipole"]["vector"][2], 1.23456, places=4)
+        # "vector" is the Debye alias; the raw a.u. components live in
+        # "vector_au".
+        self.assertAlmostEqual(p.data["dipole"]["vector_au"][2], 1.23456, places=4)
+        self.assertAlmostEqual(
+            p.data["dipole"]["vector"][2], 1.23456 * AU_TO_DEBYE, places=4
+        )
 
 
 # ---------------------------------------------------------------------------
