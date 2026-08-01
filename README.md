@@ -109,6 +109,8 @@ Visualize vibrational modes and spectra.
 - Custom reference management and equivalent-atom merging.
 
 ![NMR](img/nmr.png)
+[![GitHub tag](https://img.shields.io/github/v/tag/HiroYokoyama/moleditpy_orca_result_analyzer_rust?label=version)](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust/tags)
+[![GitHub Downloads](https://img.shields.io/github/downloads/HiroYokoyama/moleditpy_orca_result_analyzer_rust/total)](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust/releases)
 
 ## Requirements
 
