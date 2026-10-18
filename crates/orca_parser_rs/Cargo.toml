@@ -1,6 +1,6 @@
 [package]
 name        = "orca-parser-rs"
-version     = "5.0.0-alpha.1"
+version     = "5.0.0"
 edition     = "2021"
 description = "Rust-powered ORCA output parser for MoleditPy"
 authors     = ["HiroYokoyama"]
