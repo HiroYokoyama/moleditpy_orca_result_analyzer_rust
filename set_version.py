@@ -35,7 +35,11 @@ FILES_CARGO = [
 
 
 def semver_prefix(version: str) -> str:
-    """Return the 3-part SemVer prefix of a version string."""
+    """Translate Python prereleases to Cargo SemVer."""
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)(a|b|rc)(\d+)", version)
+    if match:
+        label = {"a": "alpha", "b": "beta", "rc": "rc"}[match[2]]
+        return f"{match[1]}-{label}.{match[3]}"
     parts = version.split(".")
     return ".".join(parts[:3])
 
@@ -60,8 +64,8 @@ def main():
     version = sys.argv[1].strip()
     cargo_version = semver_prefix(version)
 
-    if not re.fullmatch(r"\d+\.\d+\.\d+(\.\d+)?", version):
-        print(f"ERROR: version must be X.Y.Z or X.Y.Z.N, got: {version!r}")
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+|(?:a|b|rc)\d+)?", version):
+        print(f"ERROR: version must be X.Y.Z, X.Y.Z.N, or a Python prerelease, got: {version!r}")
         sys.exit(1)
 
     print(f"Setting plugin version: {version}")

@@ -130,10 +130,8 @@ class TestMetadata(unittest.TestCase):
         self.assertIn("ORCA", PLUGIN_NAME)
 
     def test_plugin_version_is_semver(self):
-        parts = PLUGIN_VERSION.split(".")
-        self.assertEqual(len(parts), 3)
-        for p in parts:
-            self.assertTrue(p.isdigit(), f"Non-numeric version part: {p!r}")
+        from packaging.version import Version
+        assert Version(PLUGIN_VERSION).public == PLUGIN_VERSION
 
 
 # ---------------------------------------------------------------------------
