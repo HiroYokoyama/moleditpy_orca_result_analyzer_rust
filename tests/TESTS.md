@@ -2,8 +2,8 @@
 
 ## Overview
 
-All tests run headlessly without a display server and without requiring PyQt6,
-PySide6, or a GPU.  PyQt6 and `matplotlib.backends.backend_qtagg` are stubbed
+All tests run headlessly without a display server and without requiring PySide6,
+PySide6, or a GPU.  PySide6 and `matplotlib.backends.backend_qtagg` are stubbed
 at module level in tests that need them.  `parser.py` and `utils.py` are
 loaded directly via `importlib.util` with no stubs at all, since they have
 no Qt or third-party dependencies.
@@ -276,7 +276,7 @@ and would make `TrajectoryResultDialog` itself a MagicMock, losing all methods.
 **Plugin initialization contract — minimal Qt stubs**
 
 `__init__.py` imports `QMessageBox` and `QFileDialog` at module level, so
-minimal PyQt6 stubs are installed before loading.  Qt-dependent paths inside
+minimal PySide6 stubs are installed before loading.  Qt-dependent paths inside
 `open_orca_file()` (dialog creation, `QApplication.processEvents`, etc.) are
 not exercised here — they require a live Qt application.
 
@@ -323,7 +323,7 @@ collection-order dependencies.
 | `utils.py` | Loaded directly — no stubs |
 | `vis.py` (_parse_cube only) | Cube reading logic reimplemented in test — no PyVista needed |
 | `traj_analysis.py` | Qt and matplotlib Qt backend stubbed; `QDialog`/`FigureCanvasQTAgg` as real inheritable classes |
-| `__init__.py` | Minimal PyQt6 (`QMessageBox`, `QFileDialog`) stubbed as `MagicMock()` |
+| `__init__.py` | Minimal PySide6 (`QMessageBox`, `QFileDialog`) stubbed as `MagicMock()` |
 
 ## Coverage Summary
 

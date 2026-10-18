@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import MagicMock
 
 # Stub Qt
-if "PyQt6" not in sys.modules:
-    pyqt6 = MagicMock()
+if "PySide6" not in sys.modules:
+    pyside6 = MagicMock()
     qtw = MagicMock()
 
     class _QDialog:
@@ -41,19 +41,19 @@ if "PyQt6" not in sys.modules:
 
     qtw.QDialog = _QDialog
 
-    sys.modules["PyQt6"] = pyqt6
-    sys.modules["PyQt6.QtWidgets"] = qtw
-    sys.modules["PyQt6.QtCore"] = MagicMock()
-    sys.modules["PyQt6.QtGui"] = MagicMock()
+    sys.modules["PySide6"] = pyside6
+    sys.modules["PySide6.QtWidgets"] = qtw
+    sys.modules["PySide6.QtCore"] = MagicMock()
+    sys.modules["PySide6.QtGui"] = MagicMock()
 
     # Stub matplotlib and pyvista
     sys.modules["matplotlib.backends.backend_qtagg"] = MagicMock()
     sys.modules["matplotlib.figure"] = MagicMock()
     sys.modules["pyvista"] = MagicMock()
 
-# Ensure QObject is a class on sys.modules["PyQt6.QtCore"]
-if "PyQt6.QtCore" in sys.modules:
-    qt_core = sys.modules["PyQt6.QtCore"]
+# Ensure QObject is a class on sys.modules["PySide6.QtCore"]
+if "PySide6.QtCore" in sys.modules:
+    qt_core = sys.modules["PySide6.QtCore"]
     if (
         not hasattr(qt_core, "QObject")
         or "Mock" in type(getattr(qt_core, "QObject")).__name__

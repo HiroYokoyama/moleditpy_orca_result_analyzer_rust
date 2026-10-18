@@ -2,9 +2,9 @@ PLUGIN_NAME = "ORCA Result Analyzer"
 PLUGIN_VERSION = "3.12.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Comprehensive analyzer for ORCA output files (.out). Includes Vibrational, MO, TDDFT, and NMR analysis."
-PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
+PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=5.0.0a1, <6.0.0"
 
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 import logging  # noqa: E402
 
 _context = None  # Stored from initialize() so run() can use the registry API

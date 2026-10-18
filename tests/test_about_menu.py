@@ -7,11 +7,11 @@ import unittest
 from unittest.mock import MagicMock
 
 # Stub Qt
-if "PyQt6.QtWidgets" in sys.modules:
-    qtw = sys.modules["PyQt6.QtWidgets"]
+if "PySide6.QtWidgets" in sys.modules:
+    qtw = sys.modules["PySide6.QtWidgets"]
 else:
     qtw = MagicMock()
-    sys.modules["PyQt6.QtWidgets"] = qtw
+    sys.modules["PySide6.QtWidgets"] = qtw
 
 if not hasattr(qtw, "QLabel") or "Mock" in type(getattr(qtw, "QLabel")).__name__:
 
@@ -106,11 +106,11 @@ if not hasattr(qtw, "QDialog") or "Mock" in type(getattr(qtw, "QDialog")).__name
 
     qtw.QDialog = _QDialog
 
-if "PyQt6" not in sys.modules:
-    sys.modules["PyQt6"] = MagicMock()
-if "PyQt6.QtCore" not in sys.modules:
-    sys.modules["PyQt6.QtCore"] = MagicMock()
-qt_core = sys.modules["PyQt6.QtCore"]
+if "PySide6" not in sys.modules:
+    sys.modules["PySide6"] = MagicMock()
+if "PySide6.QtCore" not in sys.modules:
+    sys.modules["PySide6.QtCore"] = MagicMock()
+qt_core = sys.modules["PySide6.QtCore"]
 if (
     not hasattr(qt_core, "QObject")
     or "Mock" in type(getattr(qt_core, "QObject")).__name__
@@ -126,8 +126,8 @@ if (
             return MagicMock()
 
     qt_core.QObject = _QObject
-if "PyQt6.QtGui" not in sys.modules:
-    sys.modules["PyQt6.QtGui"] = MagicMock()
+if "PySide6.QtGui" not in sys.modules:
+    sys.modules["PySide6.QtGui"] = MagicMock()
 
 # Stub matplotlib and pyvista backends if not present
 if "matplotlib.backends.backend_qtagg" not in sys.modules:
@@ -140,7 +140,7 @@ from orca_result_analyzer_rust.parser import OrcaParser  # noqa: E402
 
 
 class TestAboutMenu(unittest.TestCase):
-    @unittest.mock.patch("PyQt6.QtWidgets.QMessageBox.about", create=True)
+    @unittest.mock.patch("PySide6.QtWidgets.QMessageBox.about", create=True)
     def test_show_about(self, mock_about):
         """Test that show_about calls QMessageBox.about."""
         parser = OrcaParser()
@@ -304,7 +304,7 @@ class TestAboutMenu(unittest.TestCase):
     def test_open_directory_path_multiple_files(self):
         """Test that _open_directory_path opens the picker if multiple files are found."""
         from unittest.mock import patch
-        from PyQt6.QtWidgets import QDialog
+        from PySide6.QtWidgets import QDialog
 
         parser = OrcaParser()
         ctx = MagicMock()

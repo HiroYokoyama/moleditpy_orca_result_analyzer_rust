@@ -3,7 +3,7 @@ import os
 import json
 import numpy as np
 import pyvista as pv
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
 )
-from PyQt6.QtGui import QColor, QPainter, QLinearGradient
-from PyQt6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QLinearGradient
+from PySide6.QtCore import Qt
 import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap
 from .utils import get_default_export_path, save_json_atomic

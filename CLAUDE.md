@@ -76,7 +76,7 @@ python run_tests.py          # CI-faithful (disables pytest plugin autoload)
 python run_tests.py -k parser
 ```
 
-Tests stub PyQt6/PySide6 at module level. Locally-installed `pytest-qt` imports
+Tests stub PySide6/PySide6 at module level. Locally-installed `pytest-qt` imports
 a real binding at collection and defeats those stubs (spurious failures /
 segfaults), so **use `run_tests.py`** (it sets `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`),
 not raw `pytest`. CI installs no Qt binding, so it is unaffected.

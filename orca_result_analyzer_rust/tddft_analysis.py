@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QSplitter,
 )
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 import os
 import json
 

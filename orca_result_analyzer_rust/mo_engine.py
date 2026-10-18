@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 import traceback
 
 # ---------------------------------------------------------------------------
@@ -170,8 +170,8 @@ class BasisSetEngine:
 
 
 class CalcWorker(QThread):
-    progress_sig = pyqtSignal(int)
-    finished_sig = pyqtSignal(bool, str)
+    progress_sig = Signal(int)
+    finished_sig = Signal(bool, str)
 
     def __init__(
         self,

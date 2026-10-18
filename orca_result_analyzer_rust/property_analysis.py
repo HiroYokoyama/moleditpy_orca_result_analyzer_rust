@@ -4,7 +4,7 @@ Collects values that do not warrant a dedicated analysis panel (energy,
 charge/multiplicity, dispersion correction, <S**2> spin contamination, ...).
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,

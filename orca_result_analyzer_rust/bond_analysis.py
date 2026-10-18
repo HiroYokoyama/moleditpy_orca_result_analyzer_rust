@@ -12,7 +12,7 @@ atom(s) it spans.
 
 import logging
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QVBoxLayout,
@@ -25,8 +25,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 
 
 def _hyb_percent(hybrids):

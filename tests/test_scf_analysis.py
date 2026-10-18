@@ -3,7 +3,7 @@ tests/test_scf_analysis.py
 Unit tests for SCFTraceDialog's pure logic: CSV export (all-blocks
 concatenation vs per-block) and the update_plot guard branches.
 
-PyQt6 and the matplotlib Qt backend are stubbed so the module imports
+PySide6 and the matplotlib Qt backend are stubbed so the module imports
 headlessly; the dialog's Qt constructor is bypassed (object.__new__) and
 lightweight fakes stand in for the combo box, axes, canvas and parent.
 """

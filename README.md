@@ -1,4 +1,6 @@
 # MoleditPy ORCA Result Analyzer — Rust Edition
+
+This branch targets **MoleditPy 5.0.0a1–5.x** and uses **PySide6**. Plugin licensing is unchanged.
 [![GitHub tag](https://img.shields.io/github/v/tag/HiroYokoyama/moleditpy_orca_result_analyzer_rust?label=version)](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust/tags)
 [![GitHub Downloads](https://img.shields.io/github/downloads/HiroYokoyama/moleditpy_orca_result_analyzer_rust/total)](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust/releases)
 
@@ -116,7 +118,7 @@ Visualize vibrational modes and spectra.
 
 - **MoleditPy** (main application)
 - **Rust toolchain** + **maturin** (build-time only)
-- **Runtime Python deps**: `PyQt6`, `rdkit`, `matplotlib`, `Pillow`, `pyvista`
+- **Runtime Python deps**: `PySide6`, `rdkit`, `matplotlib`, `Pillow`, `pyvista`
 - **Optional**: `nmrsim` (for J-coupling simulation)
 
 ## Required ORCA Keywords

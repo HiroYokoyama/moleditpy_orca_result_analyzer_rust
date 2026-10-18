@@ -2,7 +2,7 @@
 """CI-faithful test runner.
 
 Runs the suite the way CI does: with third-party pytest plugin autoload
-disabled. The tests stub PyQt6/PySide6 at module level; a locally-installed
+disabled. The tests stub PySide6/PySide6 at module level; a locally-installed
 pytest-qt otherwise imports a real binding at collection and defeats those
 stubs, causing spurious failures/segfaults. Disabling autoload keeps local
 runs matching CI regardless of what is installed.

@@ -5,7 +5,7 @@ Unit tests for orca_result_analyzer_rust/__init__.py.
 Tests plugin metadata, initialize() registration contract, and the
 handle_drop() detection logic (non-Qt paths only).
 
-PyQt6 is stubbed at module level since __init__.py imports
+PySide6 is stubbed at module level since __init__.py imports
 QMessageBox and QFileDialog unconditionally.  The Qt-dependent code
 paths inside open_orca_file() (QApplication, OrcaResultAnalyzerDialog, etc.)
 are not exercised here because they require a live display.
@@ -23,9 +23,9 @@ _SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _install_qt_stubs():
-    """Install minimal PyQt6 stubs needed for __init__.py import."""
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
-    existing_pyqt6 = sys.modules.get("PyQt6")
+    """Install minimal PySide6 stubs needed for __init__.py import."""
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
+    existing_pyside6 = sys.modules.get("PySide6")
 
     if existing_widgets is not None:
         if not hasattr(existing_widgets, "QMessageBox"):
@@ -39,19 +39,19 @@ def _install_qt_stubs():
         elif not hasattr(existing_widgets.QApplication, "processEvents"):
             existing_widgets.QApplication.processEvents = MagicMock()
     else:
-        _pyqt6 = existing_pyqt6 or types.ModuleType("PyQt6")
-        _widgets = types.ModuleType("PyQt6.QtWidgets")
+        _pyside6 = existing_pyside6 or types.ModuleType("PySide6")
+        _widgets = types.ModuleType("PySide6.QtWidgets")
         _widgets.QMessageBox = MagicMock()
         _widgets.QFileDialog = MagicMock()
         app_mock = MagicMock()
         app_mock.processEvents = MagicMock()
         _widgets.QApplication = app_mock
-        _pyqt6.QtWidgets = _widgets
+        _pyside6.QtWidgets = _widgets
 
         sys.modules.update(
             {
-                "PyQt6": _pyqt6,
-                "PyQt6.QtWidgets": _widgets,
+                "PySide6": _pyside6,
+                "PySide6.QtWidgets": _widgets,
             }
         )
 
@@ -322,7 +322,7 @@ class TestRunFunction(unittest.TestCase):
         _init_mod._open_orca_analyzer_empty = lambda c: calls.append(c)
 
         # Also make sure QFileDialog is a clean mock we can introspect
-        widgets_mod = sys.modules.get("PyQt6.QtWidgets")
+        widgets_mod = sys.modules.get("PySide6.QtWidgets")
         file_dialog_mock = MagicMock()
         original_fd = getattr(widgets_mod, "QFileDialog", None)
         if widgets_mod:
@@ -514,7 +514,7 @@ class TestReadOrcaFile(unittest.TestCase):
     def _read_expecting_error(self, path):
         """Read *path* with a known-good QMessageBox, returning (result, box).
 
-        Other test modules install their own PyQt6 stubs process-wide, so pin
+        Other test modules install their own PySide6 stubs process-wide, so pin
         the message box rather than relying on whichever one is currently
         bound; the error branch calls QMessageBox.critical.
         """

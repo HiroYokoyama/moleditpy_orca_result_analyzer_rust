@@ -10,7 +10,7 @@ Unit tests for the bug-fixes applied in v2.6.0:
     - apply_preset() blocks signals on all vis widgets so only ONE show_cube()
       call is made per preset application (no intermediate phantom renders).
 
-PyQt6, pyvista, rdkit, numpy, matplotlib, PIL and all related sub-modules are
+PySide6, pyvista, rdkit, numpy, matplotlib, PIL and all related sub-modules are
 fully stubbed so tests run headlessly.
 """
 
@@ -192,11 +192,11 @@ class _RecordingTimer:
 def _install_nmr_stubs():
     """Install stubs for headless NMR loading.
 
-    When the full suite runs, real PyQt6 may already be in sys.modules from
+    When the full suite runs, real PySide6 may already be in sys.modules from
     earlier tests.  Replacing it wholesale breaks the test runner.  Instead:
       - If QtWidgets is already present, patch only the names nmr_analysis
         needs that are missing (MagicMock stand-ins).
-      - If PyQt6 is absent, install a complete stub module.
+      - If PySide6 is absent, install a complete stub module.
     numpy / matplotlib / pyvista stubs are always installed under their real
     names so nmr_analysis can import them without a display.
     """
@@ -237,38 +237,38 @@ def _install_nmr_stubs():
         "QSpinBox",
     ]
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
-    existing_core = sys.modules.get("PyQt6.QtCore")
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
+    existing_core = sys.modules.get("PySide6.QtCore")
 
     if existing_widgets is not None:
-        # Real PyQt6 already loaded — only patch missing names
+        # Real PySide6 already loaded — only patch missing names
         for name in _WIDGET_NAMES:
             if not hasattr(existing_widgets, name):
                 setattr(existing_widgets, name, MagicMock)
         if existing_core is not None and not hasattr(existing_core, "QTimer"):
             existing_core.QTimer = _RecordingTimer
     else:
-        # No PyQt6 yet — build and install full stub
-        _pyqt6 = types.ModuleType("PyQt6")
-        _core = types.ModuleType("PyQt6.QtCore")
+        # No PySide6 yet — build and install full stub
+        _pyside6 = types.ModuleType("PySide6")
+        _core = types.ModuleType("PySide6.QtCore")
         _core.Qt = MagicMock()
         _core.QTimer = _RecordingTimer
-        _widgets = types.ModuleType("PyQt6.QtWidgets")
+        _widgets = types.ModuleType("PySide6.QtWidgets")
         for name in _WIDGET_NAMES:
             setattr(_widgets, name, MagicMock)
         _widgets.QDialog = _Base
-        _pyqt6.QtWidgets = _widgets
-        _pyqt6.QtCore = _core
-        _gui = types.ModuleType("PyQt6.QtGui")
+        _pyside6.QtWidgets = _widgets
+        _pyside6.QtCore = _core
+        _gui = types.ModuleType("PySide6.QtGui")
         _gui.QColor = _QColor
         _gui.QBrush = MagicMock
-        _pyqt6.QtGui = _gui
+        _pyside6.QtGui = _gui
         sys.modules.update(
             {
-                "PyQt6": _pyqt6,
-                "PyQt6.QtWidgets": _widgets,
-                "PyQt6.QtCore": _core,
-                "PyQt6.QtGui": _gui,
+                "PySide6": _pyside6,
+                "PySide6.QtWidgets": _widgets,
+                "PySide6.QtCore": _core,
+                "PySide6.QtGui": _gui,
             }
         )
 
@@ -520,7 +520,7 @@ def _install_mo_stubs():
         "QComboBox",
     ]
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
 
     if existing_widgets is not None:
         # Patch whatever is already there
@@ -531,27 +531,27 @@ def _install_mo_stubs():
                 else:
                     setattr(existing_widgets, name, MagicMock)
     else:
-        _pyqt6_mo = types.ModuleType("PyQt6")
-        _core_mo = types.ModuleType("PyQt6.QtCore")
+        _pyside6_mo = types.ModuleType("PySide6")
+        _core_mo = types.ModuleType("PySide6.QtCore")
         _core_mo.Qt = MagicMock()
-        _widgets_mo = types.ModuleType("PyQt6.QtWidgets")
+        _widgets_mo = types.ModuleType("PySide6.QtWidgets")
         for name in _MO_WIDGET_NAMES:
             if name in ["QWidget", "QDialog"]:
                 setattr(_widgets_mo, name, _Base)
             else:
                 setattr(_widgets_mo, name, MagicMock)
-        _pyqt6_mo.QtWidgets = _widgets_mo
-        _pyqt6_mo.QtCore = _core_mo
-        _gui_mo = types.ModuleType("PyQt6.QtGui")
+        _pyside6_mo.QtWidgets = _widgets_mo
+        _pyside6_mo.QtCore = _core_mo
+        _gui_mo = types.ModuleType("PySide6.QtGui")
         _gui_mo.QColor = _QColor
         _gui_mo.QBrush = MagicMock
-        _pyqt6_mo.QtGui = _gui_mo
+        _pyside6_mo.QtGui = _gui_mo
         sys.modules.update(
             {
-                "PyQt6": _pyqt6_mo,
-                "PyQt6.QtWidgets": _widgets_mo,
-                "PyQt6.QtCore": _core_mo,
-                "PyQt6.QtGui": _gui_mo,
+                "PySide6": _pyside6_mo,
+                "PySide6.QtWidgets": _widgets_mo,
+                "PySide6.QtCore": _core_mo,
+                "PySide6.QtGui": _gui_mo,
             }
         )
 

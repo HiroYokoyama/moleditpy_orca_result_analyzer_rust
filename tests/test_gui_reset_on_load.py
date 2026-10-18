@@ -13,11 +13,11 @@ from unittest.mock import MagicMock, patch
 
 # Stub Qt (mirrors tests/test_about_menu.py's bootstrap so this file is
 # self-sufficient regardless of test collection order).
-if "PyQt6.QtWidgets" in sys.modules:
-    qtw = sys.modules["PyQt6.QtWidgets"]
+if "PySide6.QtWidgets" in sys.modules:
+    qtw = sys.modules["PySide6.QtWidgets"]
 else:
     qtw = MagicMock()
-    sys.modules["PyQt6.QtWidgets"] = qtw
+    sys.modules["PySide6.QtWidgets"] = qtw
 
 if not hasattr(qtw, "QLabel") or "Mock" in type(getattr(qtw, "QLabel")).__name__:
 
@@ -112,11 +112,11 @@ if not hasattr(qtw, "QDialog") or "Mock" in type(getattr(qtw, "QDialog")).__name
 
     qtw.QDialog = _QDialog
 
-if "PyQt6" not in sys.modules:
-    sys.modules["PyQt6"] = MagicMock()
-if "PyQt6.QtCore" not in sys.modules:
-    sys.modules["PyQt6.QtCore"] = MagicMock()
-qt_core = sys.modules["PyQt6.QtCore"]
+if "PySide6" not in sys.modules:
+    sys.modules["PySide6"] = MagicMock()
+if "PySide6.QtCore" not in sys.modules:
+    sys.modules["PySide6.QtCore"] = MagicMock()
+qt_core = sys.modules["PySide6.QtCore"]
 if (
     not hasattr(qt_core, "QObject")
     or "Mock" in type(getattr(qt_core, "QObject")).__name__
@@ -132,8 +132,8 @@ if (
             return MagicMock()
 
     qt_core.QObject = _QObject
-if "PyQt6.QtGui" not in sys.modules:
-    sys.modules["PyQt6.QtGui"] = MagicMock()
+if "PySide6.QtGui" not in sys.modules:
+    sys.modules["PySide6.QtGui"] = MagicMock()
 
 if "matplotlib.backends.backend_qtagg" not in sys.modules:
     sys.modules["matplotlib.backends.backend_qtagg"] = MagicMock()

@@ -6,7 +6,7 @@ animation, settings) and FreqSpectrumWindow (IR/Raman switching, scaling
 propagation, axis ranges, exports).
 
 Kept separate from the existing tests/test_freq_analysis.py, which installs its
-own partial PyQt6 stubs process-wide; this module drives the real dialog code
+own partial PySide6 stubs process-wide; this module drives the real dialog code
 through gui_harness instead.
 
 ``settings_file`` points inside the installed package, so every test redirects

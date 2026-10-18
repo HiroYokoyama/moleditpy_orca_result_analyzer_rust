@@ -3,7 +3,7 @@ import json
 import math
 import numpy as np
 import pyvista as pv
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 import logging
 
 try:
@@ -83,7 +83,7 @@ class ConvergenceGraphDialog(QDialog):
 
     def export_csv(self):
         """Export convergence data to CSV."""
-        from PyQt6.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
         import csv
 
         display_keys = {
@@ -121,7 +121,7 @@ class ConvergenceGraphDialog(QDialog):
             rows.append(row)
 
         if not rows:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.warning(self, "No Data", "No convergence data to export.")
             return
@@ -137,11 +137,11 @@ class ConvergenceGraphDialog(QDialog):
                 writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.critical(self, "Export Error", str(e))
 

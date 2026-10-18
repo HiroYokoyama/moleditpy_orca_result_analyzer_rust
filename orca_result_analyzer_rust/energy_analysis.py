@@ -4,7 +4,7 @@ Shows whatever correlated-method components the parser found (MP2 correlation
 and total; CCSD(T) reference / correlation / (T) / totals; T1 diagnostic).
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,

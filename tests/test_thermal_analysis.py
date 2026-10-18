@@ -3,7 +3,7 @@ tests/test_thermal_analysis.py
 Unit tests for ThermalTableDialog's pure logic: the update_table row builder,
 copy_table, export_csv, and the settings load/save round-trip.
 
-PyQt6 is stubbed so the module imports headlessly; the dialog's Qt constructor
+PySide6 is stubbed so the module imports headlessly; the dialog's Qt constructor
 is bypassed (object.__new__) and lightweight fakes stand in for the checkbox
 and table so the row-generation logic can be exercised directly.
 """

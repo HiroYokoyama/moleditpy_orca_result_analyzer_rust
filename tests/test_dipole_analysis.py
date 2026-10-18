@@ -4,7 +4,7 @@ Unit tests for DipoleDialog's pure logic: the update_view arrow builder
 (center-of-mass, reverse toggle, zero-magnitude guard, actor clearing) and the
 settings load/save round-trip.
 
-PyQt6 is stubbed so the module imports headlessly; numpy/pyvista are real.
+PySide6 is stubbed so the module imports headlessly; numpy/pyvista are real.
 The dialog's Qt constructor is bypassed (object.__new__) with lightweight
 fakes for the checkboxes/spin boxes and a recording plotter. pyvista.Arrow is
 patched to capture the direction/scale it is handed.

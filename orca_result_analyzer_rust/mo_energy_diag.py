@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -12,8 +12,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QToolTip,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QAction
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QAction
 
 try:
     import nist
@@ -443,7 +443,7 @@ class EnergyDiagramDialog(QDialog):
 
         # Reset Hit Zones
         self.hit_zones = []  # List of (QRect, index, label)
-        from PyQt6.QtCore import QRect
+        from PySide6.QtCore import QRect
 
         w = self.width()
         h = self.height()

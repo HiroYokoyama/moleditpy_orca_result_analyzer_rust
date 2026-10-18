@@ -6,7 +6,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from .parser import OrcaParser
 from .utils import (
     get_default_export_path,

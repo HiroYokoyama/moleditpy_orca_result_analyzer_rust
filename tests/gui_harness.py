@@ -2,7 +2,7 @@
 tests/gui_harness.py
 Isolated headless-Qt loader for instantiation-style coverage tests.
 
-Every other test module in this suite installs its own partial PyQt6 stub into
+Every other test module in this suite installs its own partial PySide6 stub into
 the shared ``sys.modules`` and relies on those exact objects at run time. So we
 must NOT mutate the shared stubs in a way that outlives our own imports.
 
@@ -905,11 +905,11 @@ def _pyvista_module():
 
 
 class qt_available:
-    """Context manager making ``PyQt6.QtWidgets`` importable *at call time*.
+    """Context manager making ``PySide6.QtWidgets`` importable *at call time*.
 
     ``load_isolated`` restores sys.modules once a module is imported, but some
     methods import Qt lazily inside the function body (e.g.
-    ``from PyQt6.QtWidgets import QInputDialog`` in save_custom_preset). Wrap
+    ``from PySide6.QtWidgets import QInputDialog`` in save_custom_preset). Wrap
     such calls in this to install a stub package for the duration, optionally
     overriding individual names::
 
@@ -917,7 +917,7 @@ class qt_available:
             dialog.save_custom_preset()
     """
 
-    _KEYS = ("PyQt6", "PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui")
+    _KEYS = ("PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui")
 
     def __init__(self, **overrides):
         self._overrides = overrides
@@ -925,13 +925,13 @@ class qt_available:
     def __enter__(self):
         self._saved = {k: sys.modules.get(k, _SENTINEL) for k in self._KEYS}
 
-        pkg = types.ModuleType("PyQt6")
+        pkg = types.ModuleType("PySide6")
         pkg.__path__ = []
         widgets = _fresh_module(
-            "PyQt6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
+            "PySide6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
         )
-        core = _fresh_module("PyQt6.QtCore", _QTC_BASES, _make_widget)
-        gui = _fresh_module("PyQt6.QtGui", [], _make_widget,
+        core = _fresh_module("PySide6.QtCore", _QTC_BASES, _make_widget)
+        gui = _fresh_module("PySide6.QtGui", [], _make_widget,
                             extra={"QColor": QColorStub})
         for name, value in self._overrides.items():
             setattr(widgets, name, value)
@@ -939,10 +939,10 @@ class qt_available:
 
         sys.modules.update(
             {
-                "PyQt6": pkg,
-                "PyQt6.QtWidgets": widgets,
-                "PyQt6.QtCore": core,
-                "PyQt6.QtGui": gui,
+                "PySide6": pkg,
+                "PySide6.QtWidgets": widgets,
+                "PySide6.QtCore": core,
+                "PySide6.QtGui": gui,
             }
         )
         return widgets
@@ -975,9 +975,9 @@ _load_counter = [0]
 
 # sys.modules keys we swap for the duration of an isolated load.
 _SWAP_KEYS = [
-    "PyQt6.QtWidgets",
-    "PyQt6.QtCore",
-    "PyQt6.QtGui",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
     "matplotlib.backends.backend_qtagg",
     "pyvista",
     # Other test modules leave permanent numpy/matplotlib fakes behind; the
@@ -991,14 +991,14 @@ _SWAP_KEYS = [
 
 
 def load_isolated(modname):
-    _ensure_module("PyQt6")
+    _ensure_module("PySide6")
 
     swapped = {
-        "PyQt6.QtWidgets": _fresh_module(
-            "PyQt6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
+        "PySide6.QtWidgets": _fresh_module(
+            "PySide6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
         ),
-        "PyQt6.QtCore": _fresh_module("PyQt6.QtCore", _QTC_BASES, _make_widget),
-        "PyQt6.QtGui": _fresh_module("PyQt6.QtGui", [], _make_widget,
+        "PySide6.QtCore": _fresh_module("PySide6.QtCore", _QTC_BASES, _make_widget),
+        "PySide6.QtGui": _fresh_module("PySide6.QtGui", [], _make_widget,
                                      extra={"QColor": QColorStub}),
         "pyvista": _pyvista_module(),
     }

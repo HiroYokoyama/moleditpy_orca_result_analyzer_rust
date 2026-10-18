@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QSlider,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 import math
 import numpy as np
 import os
@@ -743,7 +743,7 @@ class FrequencyDialog(QDialog):
         self.combo_preset.blockSignals(False)
 
     def save_custom_preset(self):
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(self, "Save Scaling Preset", "Preset Name:")
         if ok and name:

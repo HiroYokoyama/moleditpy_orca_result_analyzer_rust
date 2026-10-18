@@ -3,7 +3,7 @@ import os
 import re
 import json
 import logging
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 import pyvista as pv
 import numpy as np
 from .utils import get_default_export_path, save_json_atomic

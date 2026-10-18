@@ -124,7 +124,7 @@ def main():
         platform_tag = "unknown"
 
     # Read plugin version from __init__.py by parsing the text, NOT by importing
-    # it — __init__.py imports PyQt6, which is absent in the build environment
+    # it — __init__.py imports PySide6, which is absent in the build environment
     # (that made the zip name fall back to "unknown").
     import re
     version_tag = "unknown"
