@@ -346,3 +346,50 @@ class TestSCFTrace(_TempModuleDir):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCustomReferenceValidation(_TempModuleDir):
+    MODULE = REF
+
+    def _dialog(self, parent=None):
+        return REF.CustomReferenceDialog(parent or MagicMock(), existing_nuclei=["1H"])
+
+    def test_the_reserved_names_are_refused(self):
+        for name in ("Custom", "No Reference"):
+            dlg = self._dialog()
+            dlg.edit_name.setText(name)
+            with patch.object(REF.QMessageBox, "warning") as warn, patch.object(
+                dlg, "accept"
+            ) as acc:
+                dlg.accept_reference()
+            acc.assert_not_called()
+            self.assertIn("reserved", warn.call_args[0][2])
+
+    def test_symbol_and_isotope_count_as_the_same_nucleus(self):
+        nmr = MagicMock()
+        nmr.get_nucleus_key = lambda s: {"H": "1H"}.get(s, s)
+        dlg = self._dialog()
+        dlg.parent = lambda: nmr
+        dlg.edit_name.setText("Mine")
+        dlg.add_nucleus_row()
+        dlg.nucleus_widgets[0][0].setCurrentText("H")
+        dlg.nucleus_widgets[1][0].setCurrentText("1H")
+        with patch.object(REF.QMessageBox, "warning") as warn, patch.object(
+            dlg, "accept"
+        ) as acc:
+            dlg.accept_reference()
+        acc.assert_not_called()
+        self.assertIn("multiple times", warn.call_args[0][2])
+
+
+class TestSCFExportFailure(TestSCFTrace):
+    def test_a_failed_export_is_reported_to_the_user(self):
+        blocker = os.path.join(self.tmp, "a_file")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        bad = os.path.join(blocker, "scf.csv")  # a path under a file
+        with patch.object(
+            SCF.QFileDialog, "getSaveFileName", return_value=(bad, "")
+        ), patch.object(SCF.QMessageBox, "critical") as crit:
+            self.dlg.export_csv()
+        crit.assert_called_once()

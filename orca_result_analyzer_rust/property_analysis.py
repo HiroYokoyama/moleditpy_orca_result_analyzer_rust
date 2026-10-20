@@ -4,7 +4,7 @@ Collects values that do not warrant a dedicated analysis panel (energy,
 charge/multiplicity, dispersion correction, <S**2> spin contamination, ...).
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -15,6 +15,8 @@ from .bond_analysis import _make_table
 
 
 class PropertiesDialog(QDialog):
+    """Dialog listing scalar/global result properties (energy, charge, spin, ...)."""
+
     def __init__(self, parent, data):
         super().__init__(parent)
         self.setWindowTitle("Properties")

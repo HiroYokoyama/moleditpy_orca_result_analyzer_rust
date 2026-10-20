@@ -357,6 +357,30 @@ class TestSettings(_MOCase):
         self.dlg.settings_file = os.path.join(self.tmp, "nope.json")
         self.dlg.load_settings()  # must not raise
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        others = {
+            "dipole_settings": {"res": 20},
+            "nmr_settings": {"ref": "TMS"},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.dlg.settings_file, "w", encoding="utf-8") as fh:
+            json.dump(others, fh)
+
+        self.dlg.save_settings()
+
+        with open(self.dlg.settings_file, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertIn("mo_settings", on_disk)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        self.dlg.save_settings()
+
+        section = S.load_section(self.dlg.settings_file, "mo_settings")
+        self.assertEqual(section["last_preset"], self.dlg.combo_presets.currentText())
+
     def test_escape_routes_through_close(self):
         with patch.object(self.dlg, "close") as closer:
             self.dlg.reject()

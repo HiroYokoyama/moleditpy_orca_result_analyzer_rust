@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import (
+"""SCF Trace dialog: convergence plot per iteration, dispersion and spin-contamination."""
+
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -7,6 +9,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QFileDialog,
+    QMessageBox,
 )
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg as FigureCanvas,
@@ -15,11 +18,13 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import csv
-from .utils import get_default_export_path
+from .utils import get_default_export_path, notify
 import logging
 
 
 class SCFTraceDialog(QDialog):
+    """Dialog plotting SCF energy convergence, with dispersion and spin-contamination info."""
+
     def __init__(self, parent, scf_traces, dispersion=None, spin_s2=None):
         super().__init__(parent)
         self.setWindowTitle("SCF Energy Trace")
@@ -104,25 +109,30 @@ class SCFTraceDialog(QDialog):
 
         # Close Button
         btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.accept)
+        btn_close.clicked.connect(self.close)  # accept() skips closeEvent (Qt >= 6.3)
         layout.addWidget(btn_close)
 
         self.update_plot()
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
     def closeEvent(self, event):
+        """Close the matplotlib figure to release its resources."""
         try:
             plt.close(self.figure)
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
+        except (AttributeError, ValueError, NotImplementedError) as e:
+            logging.debug(
+                "SCF: could not close the matplotlib figure on dialog close: %s", e
+            )
         # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
         # which is routed back through close() and would recurse.
         event.accept()
 
     def update_plot(self):
+        """Redraw the SCF energy plot for the selected block (or all blocks)."""
         idx = self.combo_steps.currentData()
         if idx is None:
             return
@@ -213,6 +223,7 @@ class SCFTraceDialog(QDialog):
         self.canvas.draw_idle()
 
     def export_csv(self):
+        """Prompt for a path and write the SCF trace (selected block or all) to CSV."""
         idx = self.combo_steps.currentData()
         if idx is None:
             return
@@ -252,9 +263,8 @@ class SCFTraceDialog(QDialog):
                     writer.writerow(["Iteration", "Energy (Eh)"])
                     for d in trace.get("iterations", []):
                         writer.writerow([d["iter"], d["energy"]])
-            if self.parent() and self.parent().context:
-                self.parent().context.show_status_message(
-                    f"Data exported to {path}", 5000
-                )
-        except Exception as e:
-            logging.warning("Error exporting CSV: %s", e)
+            notify(self, f"Data exported to {path}", 5000)
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning("SCF: exporting the trace to %s failed: %s", path, e)
+            QMessageBox.critical(self, "Export Error", f"Failed to export CSV:\n{e}")

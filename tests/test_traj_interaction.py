@@ -152,9 +152,7 @@ class TestManualLoad(_TrajCase):
     def test_choosing_a_file_loads_it(self):
         dlg = self._make(_summary_steps(), base_dir=self.tmp)
         chosen = self._write_trj("picked_MEP_trj.xyz")
-        with patch.object(
-            TR.QFileDialog, "getOpenFileName", return_value=(chosen, "")
-        ):
+        with patch.object(TR.QFileDialog, "getOpenFileName", return_value=(chosen, "")):
             with patch.object(dlg, "load_external_trj") as load:
                 dlg.load_mep_trj()
         load.assert_called_once_with(chosen)
@@ -281,9 +279,7 @@ class TestHoverTooltip(_TrajCase):
         self.dlg.annot.set_text.assert_not_called()
 
     def test_a_reaction_coordinate_is_included_when_known(self):
-        dlg = self._make(
-            [dict(s, dist=0.5 * i) for i, s in enumerate(_full_steps())]
-        )
+        dlg = self._make([dict(s, dist=0.5 * i) for i, s in enumerate(_full_steps())])
         dlg.annot = MagicMock()
         dlg.annot.get_visible.return_value = False
         scatter = MagicMock()

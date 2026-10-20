@@ -177,12 +177,35 @@ class TestChargeDialog(unittest.TestCase):
         dlg.apply_colors()  # max_c==0 branch
         self.assertIn(0, host.mw.view_3d_manager._plugin_color_overrides)
 
+    def test_asymmetric_charges_share_zero_centered_color_domain(self):
+        charges = {"Mulliken": [
+            {"atom_idx": i, "atom_sym": "C", "charge": q}
+            for i, q in enumerate([-0.8, 0.2, 0.0])
+        ]}
+        dlg, host = self._dialog(charges=charges)
+        dlg.current_scheme = "Regression"
+        dlg.schemes["Regression"] = ["red", "white", "blue"]
+        dlg.apply_colors()
+        overrides = host.mw.view_3d_manager._plugin_color_overrides
+        self.assertEqual(overrides[2], "#ffffff")
+        self.assertEqual(overrides[0], "#ff0000")
+        self.assertEqual(overrides[1], "#bfbfff")
+        self.assertEqual(host.mw.plotter.add_mesh.call_args.kwargs["clim"], [-0.8, 0.8])
+
     def test_reset_colors_clears_overrides(self):
         dlg, host = self._dialog()
         dlg.apply_colors()
         dlg.reset_colors()
         self.assertEqual(host.mw.view_3d_manager._plugin_color_overrides, {})
         host.context.show_status_message.assert_called()
+
+    def test_reset_colors_notifies_host_status_bar(self):
+        dlg, host = self._dialog()
+        dlg.apply_colors()
+        dlg.reset_colors()
+        host.context.show_status_message.assert_called_with(
+            "Colors reset to CPK default.", 5000
+        )
 
     def test_toggle_labels_on_then_off(self):
         dlg, host = self._dialog()
@@ -216,6 +239,31 @@ class TestChargeDialog(unittest.TestCase):
             with open(out, encoding="utf-8") as f:
                 head = f.readline()
         self.assertIn("Charge", head)
+
+    def test_export_csv_notifies_host_status_bar(self):
+        dlg, host = self._dialog()
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "charges.csv")
+            saved = _patch_savedialog(out)
+            try:
+                dlg.export_csv()
+            finally:
+                saved()
+        host.context.show_status_message.assert_called_with(
+            f"Data exported to {out}", 5000
+        )
+
+    def test_export_csv_without_host_does_not_raise(self):
+        dlg, host = self._dialog()
+        host.context = None
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "charges.csv")
+            saved = _patch_savedialog(out)
+            try:
+                dlg.export_csv()  # must not raise even with no host reachable
+            finally:
+                saved()
+            self.assertTrue(os.path.exists(out))
 
     def test_export_csv_cancelled(self):
         dlg, _ = self._dialog()
@@ -325,5 +373,82 @@ def _patch_savedialog(return_path):
     return restore
 
 
+# ---------------------------------------------------------------------------
+# settings.py helper round-trip (Task A conversion)
+# ---------------------------------------------------------------------------
+
+
+class TestChargeSettingsHelpers(unittest.TestCase):
+    def setUp(self):
+        import json
+
+        self._json = json
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        saved = _C.__file__
+        _C.__file__ = os.path.join(self._tmp.name, "charge_analysis.py")
+        self.addCleanup(lambda: setattr(_C, "__file__", saved))
+        self.path = os.path.join(self._tmp.name, "settings.json")
+
+    def test_save_preserves_several_other_dialogs_sections(self):
+        others = {
+            "mo_settings": {"iso": 0.02},
+            "nmr_settings": {"ref": "TMS"},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.path, "w", encoding="utf-8") as fh:
+            self._json.dump(others, fh)
+
+        host = _make_host(COORDS, 3)
+        dlg = ChargeDialog(host, _charges())
+        dlg.on_scheme_change(
+            "Blue(-) - White - Red(+)"
+        )  # saves via save_custom_schemes
+
+        with open(self.path, encoding="utf-8") as fh:
+            on_disk = self._json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertIn("charge_settings", on_disk)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        host = _make_host(COORDS, 3)
+        dlg = ChargeDialog(host, _charges())
+        dlg.save_settings()
+
+        section = S.load_section(self.path, "charge_settings")
+        self.assertEqual(section["last_charge_scheme"], dlg.current_scheme)
+
+        fresh = ChargeDialog(_make_host(COORDS, 3), _charges())
+        self.assertEqual(fresh.current_scheme, dlg.current_scheme)
+
+    def test_malformed_custom_schemes_do_not_crash_construction(self):
+        # A non-dict entry makes scheme_data.get(...) raise AttributeError;
+        # the narrowed handler in __init__ must swallow it, not crash.
+        with open(self.path, "w", encoding="utf-8") as fh:
+            self._json.dump(
+                {"charge_settings": {"custom_color_schemes": ["not_a_dict"]}}, fh
+            )
+        dlg = ChargeDialog(_make_host(COORDS, 3), _charges())
+        self.assertEqual(dlg.current_scheme, "Red(-) - White - Blue(+)")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMissingSavedScheme(unittest.TestCase):
+    def test_a_vanished_saved_scheme_falls_back_instead_of_crashing(self):
+        import json
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = _C.__file__
+        _C.__file__ = os.path.join(tmp.name, "charge_analysis.py")
+        self.addCleanup(lambda: setattr(_C, "__file__", saved))
+        with open(os.path.join(tmp.name, "settings.json"), "w", encoding="utf-8") as fh:
+            json.dump({"charge_settings": {"last_charge_scheme": "Custom: Gone"}}, fh)
+
+        dlg = ChargeDialog(_make_host([[0, 0, 0]] * 3, 3), _charges())
+        self.assertEqual(dlg.current_scheme, "Red(-) - White - Blue(+)")

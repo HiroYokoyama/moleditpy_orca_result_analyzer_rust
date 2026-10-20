@@ -1,10 +1,15 @@
+"""Plugin entry points and metadata for the ORCA Result Analyzer plugin."""
+
 PLUGIN_NAME = "ORCA Result Analyzer"
-PLUGIN_VERSION = "3.12.1"
+PLUGIN_VERSION = "5.0.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Comprehensive analyzer for ORCA output files (.out). Includes Vibrational, MO, TDDFT, and NMR analysis."
-PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
+PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=5.0.0, <6.0.0"
+PLUGIN_SUPPORTED_PYTHON_VERSION = ">=3.9, <3.14"
+PLUGIN_DEPENDENCIES = ["rdkit", "PySide6", "matplotlib", "Pillow"]
+PLUGIN_OPTIONAL_DEPENDENCIES = ["nmrsim"]
 
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 import logging  # noqa: E402
 
 _context = None  # Stored from initialize() so run() can use the registry API
@@ -12,23 +17,11 @@ _context = None  # Stored from initialize() so run() can use the registry API
 
 def _read_orca_file(path, parent_widget):
     """Read an ORCA output file trying several encodings. Returns content string or None."""
-    encodings = ["utf-8", "utf-16", "latin-1", "cp1252"]
-    for enc in encodings:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                return f.read()
-        except UnicodeError:
-            continue
-        except Exception as e:
-            QMessageBox.critical(
-                parent_widget, "Error Reading File", f"Could not read file:\n{e}"
-            )
-            return None
-    # Fallback with error replace
+    from .loading import read_orca_text
+
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except Exception as e:
+        return read_orca_text(path)
+    except (OSError, ValueError) as e:
         QMessageBox.critical(
             parent_widget, "Error Reading File", f"Could not read file:\n{e}"
         )
@@ -40,28 +33,31 @@ def _open_orca_file(path, context):
     QApplication.processEvents()
     mw = context.get_main_window()
 
-    content = _read_orca_file(path, mw)
-    if content is None:
+    from .loading import load_orca_parser
+
+    try:
+        parser = load_orca_parser(path, mw)
+    except (OSError, ValueError) as e:
+        QMessageBox.critical(mw, "Error Reading File", f"Could not read file:\n{e}")
         return
-
-    from .parser import OrcaParser
-
-    parser = OrcaParser()
-    parser.load_from_memory(content, path)
+    if parser is None:  # cancelled by the user
+        return
 
     # Close existing window if open
     existing = context.get_window("analyzer")
     if existing is not None:
         try:
-            existing.close()
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
+            if existing.close() is False:
+                return
+        except (RuntimeError, AttributeError) as e:
+            logging.warning("Could not close the previous analyzer window: %s", e)
 
     # New result loaded — any atom colors applied to the previous molecule's
     # indices must not bleed onto this (possibly differently-indexed) one.
-    from .utils import clear_atom_color_overrides
+    from .utils import clear_atom_color_overrides, sync_main_window_file
 
     clear_atom_color_overrides(mw)
+    sync_main_window_file(mw, path, context)
 
     from .gui import OrcaResultAnalyzerDialog
 
@@ -94,8 +90,8 @@ def _open_orca_analyzer_empty(context):
             existing.raise_()
             existing.activateWindow()
             return
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
+        except (RuntimeError, AttributeError) as e:
+            logging.warning("Could not re-raise the existing analyzer window: %s", e)
 
     from .parser import OrcaParser
     from .gui import OrcaResultAnalyzerDialog
@@ -126,8 +122,10 @@ def _on_document_reset(context):
     if win is not None:
         try:
             win.close()
-        except Exception as e:
-            logging.warning("silenced: %s", e)
+        except (RuntimeError, AttributeError) as e:
+            logging.warning(
+                "Could not close the analyzer window on document reset: %s", e
+            )
 
     from .utils import clear_atom_color_overrides
 
@@ -154,8 +152,12 @@ def initialize(context):
                 if "* O   R   C   A *" in header or "Program Version" in header:
                     _open_orca_file(path, context)
                     return True
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (OSError, ValueError) as e:
+                logging.warning(
+                    "Could not read dropped file %s to check for an ORCA header: %s",
+                    path,
+                    e,
+                )
         return False
 
     context.register_file_opener(".out", open_orca_file, priority=100)
@@ -169,7 +171,7 @@ def initialize(context):
     )
 
 
-def run(mw):
+def run(mw):  # pylint: disable=unused-argument  # host calls run(mw); reopens via module context
     """Legacy run() entry: called from Plugins menu by the host.
 
     Opens the analyzer directly without requiring a file — the user can

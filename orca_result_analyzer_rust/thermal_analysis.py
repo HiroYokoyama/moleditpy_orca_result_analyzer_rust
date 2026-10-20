@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import (
+"""Thermochemistry dialog: enthalpy/entropy/free-energy table with CSV export."""
+
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QTableWidget,
@@ -9,14 +11,18 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QAbstractItemView,
     QFileDialog,
+    QMessageBox,
 )
 import os
-import json
 import csv
 import logging
+from .settings import load_section, save_section
+from .utils import notify
 
 
 class ThermalTableDialog(QDialog):
+    """Dialog listing thermochemistry values (enthalpy, entropy, free energy)."""
+
     def __init__(self, parent, data):
         super().__init__(parent)
         self.setWindowTitle("Thermochemistry")
@@ -50,56 +56,48 @@ class ThermalTableDialog(QDialog):
         layout.addWidget(btn_csv)
 
         btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.accept)
+        btn_close.clicked.connect(self.close)  # accept() skips closeEvent (Qt >= 6.3)
         layout.addWidget(btn_close)
 
         self.update_table()
         self.load_settings()
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
     def closeEvent(self, event):
+        """Save settings before the dialog closes."""
         self.save_settings()
         # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
         # which is routed back through close() and would recurse.
         event.accept()
 
     def load_settings(self):
+        """Restore the saved 'show detailed values' preference."""
         if os.path.exists(self.settings_file):
+            settings = load_section(self.settings_file, "thermal_settings")
             try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-
-                settings = all_settings.get("thermal_settings", {})
                 if "show_details" in settings:
                     self.chk_details.setChecked(bool(settings["show_details"]))
 
-            except Exception as e:
+            except (
+                RuntimeError,
+                AttributeError,
+                KeyError,
+                IndexError,
+                ValueError,
+            ) as e:
                 logging.warning("Error loading thermal settings: %s", e)
 
     def save_settings(self):
-        all_settings = {}
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-
+        """Persist the 'show detailed values' preference."""
         thermal_settings = {"show_details": self.chk_details.isChecked()}
-
-        all_settings["thermal_settings"] = thermal_settings
-
-        try:
-            from .utils import save_json_atomic
-
-            save_json_atomic(self.settings_file, all_settings)
-        except Exception as e:
-            logging.warning("Error saving thermal settings: %s", e)
+        save_section(self.settings_file, "thermal_settings", thermal_settings)
 
     def update_table(self):
+        """Rebuild the property/value table, including detail rows when enabled."""
         show_details = self.chk_details.isChecked()
         data = self.data
 
@@ -185,6 +183,7 @@ class ThermalTableDialog(QDialog):
                 self.table.setItem(i, 1, QTableWidgetItem("-"))
 
     def copy_table(self):
+        """Put the property/value table on the clipboard as tab-separated text."""
         text = ""
         for r in range(self.table.rowCount()):
             p = self.table.item(r, 0).text()
@@ -193,6 +192,7 @@ class ThermalTableDialog(QDialog):
         QApplication.clipboard().setText(text)
 
     def export_csv(self):
+        """Prompt for a path and write the property/value table to CSV."""
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV Files (*.csv)")
         if path:
             try:
@@ -203,9 +203,9 @@ class ThermalTableDialog(QDialog):
                         p = self.table.item(r, 0).text()
                         v = self.table.item(r, 1).text()
                         writer.writerow([p, v])
-                if self.parent() and self.parent().context:
-                    self.parent().context.show_status_message(
-                        f"Data exported to {path}", 5000
-                    )
-            except Exception:
-                logging.debug("Thermochemistry export failed", exc_info=True)
+                notify(self, f"Data exported to {path}", 5000)
+            except (OSError, IndexError, ValueError) as e:
+                logging.warning("Thermochemistry: exporting to %s failed: %s", path, e)
+                QMessageBox.critical(
+                    self, "Export Error", f"Failed to export CSV:\n{e}"
+                )

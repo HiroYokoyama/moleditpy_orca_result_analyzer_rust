@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import (
+"""Dialog for defining a custom NMR reference standard (per-nucleus delta/sigma)."""
+
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -28,6 +30,7 @@ class CustomReferenceDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
+        """Build the reference-name field and per-nucleus delta/sigma rows."""
         main_layout = QVBoxLayout(self)
 
         # Combined reference configuration group
@@ -165,11 +168,22 @@ class CustomReferenceDialog(QDialog):
         if not ref_name:
             QMessageBox.warning(self, "Missing Name", "Please enter a reference name.")
             return
+        if ref_name in ("Custom", "No Reference"):
+            # Both are placeholders the NMR dialog manages; a user entry under
+            # either name is dropped on save or cannot be deleted.
+            QMessageBox.warning(
+                self, "Reserved Name", f"'{ref_name}' is reserved; choose another name."
+            )
+            return
 
-        # Check for duplicate nuclei
+        # Check for duplicate nuclei. Compare normalized keys: "H" and "1H"
+        # are the same nucleus, and the second silently overwrote the first.
+        to_key = getattr(self.parent(), "get_nucleus_key", None)
         nuclei_used = []
         for combo, _, _, _ in self.nucleus_widgets:
-            nucleus = combo.currentText()
+            nucleus = combo.currentText().strip()
+            if callable(to_key):
+                nucleus = to_key(nucleus)
             if nucleus in nuclei_used:
                 QMessageBox.warning(
                     self,

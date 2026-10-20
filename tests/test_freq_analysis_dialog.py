@@ -6,7 +6,7 @@ animation, settings) and FreqSpectrumWindow (IR/Raman switching, scaling
 propagation, axis ranges, exports).
 
 Kept separate from the existing tests/test_freq_analysis.py, which installs its
-own partial PyQt6 stubs process-wide; this module drives the real dialog code
+own partial PySide6 stubs process-wide; this module drives the real dialog code
 through gui_harness instead.
 
 ``settings_file`` points inside the installed package, so every test redirects
@@ -595,6 +595,32 @@ class TestSettings(_FreqCase):
         self.dlg.settings_file = os.path.join(self.tmp, "nope.json")
         self.dlg.load_settings()  # must not raise
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        others = {
+            "mo_settings": {"iso": 0.02},
+            "nmr_settings": {"ref": "TMS"},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.settings_path, "w", encoding="utf-8") as fh:
+            json.dump(others, fh)
+
+        self.dlg.spin_sf_a.setValue(0.96)
+        self.dlg.save_settings()
+
+        with open(self.settings_path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertAlmostEqual(on_disk["freq_settings"]["sf_a"], 0.96)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        self.dlg.spin_sf_a.setValue(0.93)
+        self.dlg.save_settings()
+
+        section = S.load_section(self.settings_path, "freq_settings")
+        self.assertAlmostEqual(section["sf_a"], 0.93)
+
     def test_escape_routes_through_close(self):
         with patch.object(self.dlg, "close") as closer:
             self.dlg.reject()
@@ -716,9 +742,7 @@ class TestSpectrumWindow(_SpectrumCase):
         with patch.object(F.QFileDialog, "getSaveFileName", return_value=("", "")):
             self.win.save_csv()
             self.win.save_sticks()
-        self.assertFalse(
-            [f for f in os.listdir(self.tmp) if f.endswith(".csv")]
-        )
+        self.assertFalse([f for f in os.listdir(self.tmp) if f.endswith(".csv")])
 
 
 class TestOpenSpectrum(_FreqCase):

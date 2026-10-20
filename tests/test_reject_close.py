@@ -80,9 +80,7 @@ class TestRejectRoutesThroughClose(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 tree = ast.parse(f.read(), filename=path)
             for cls in _dialog_classes(tree):
-                methods = {
-                    n.name for n in cls.body if isinstance(n, ast.FunctionDef)
-                }
+                methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
                 if "closeEvent" in methods and "reject" not in methods:
                     offenders.append(f"{os.path.basename(path)}:{cls.name}")
         self.assertEqual(

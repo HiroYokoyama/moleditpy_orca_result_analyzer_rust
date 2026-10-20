@@ -431,9 +431,7 @@ class TestFileActions(_GuiCase):
         load.assert_not_called()
 
     def test_choosing_a_directory_opens_the_picker(self):
-        with patch.object(
-            G.QFileDialog, "getExistingDirectory", return_value=self.tmp
-        ):
+        with patch.object(G.QFileDialog, "getExistingDirectory", return_value=self.tmp):
             with patch.object(self.dlg, "_open_directory_path") as open_dir:
                 self.dlg.open_directory()
         open_dir.assert_called_once_with(self.tmp)

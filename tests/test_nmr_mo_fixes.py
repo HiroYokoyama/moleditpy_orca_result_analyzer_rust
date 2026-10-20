@@ -10,7 +10,7 @@ Unit tests for the bug-fixes applied in v2.6.0:
     - apply_preset() blocks signals on all vis widgets so only ONE show_cube()
       call is made per preset application (no intermediate phantom renders).
 
-PyQt6, pyvista, rdkit, numpy, matplotlib, PIL and all related sub-modules are
+PySide6, pyvista, rdkit, numpy, matplotlib, PIL and all related sub-modules are
 fully stubbed so tests run headlessly.
 """
 
@@ -192,11 +192,11 @@ class _RecordingTimer:
 def _install_nmr_stubs():
     """Install stubs for headless NMR loading.
 
-    When the full suite runs, real PyQt6 may already be in sys.modules from
+    When the full suite runs, real PySide6 may already be in sys.modules from
     earlier tests.  Replacing it wholesale breaks the test runner.  Instead:
       - If QtWidgets is already present, patch only the names nmr_analysis
         needs that are missing (MagicMock stand-ins).
-      - If PyQt6 is absent, install a complete stub module.
+      - If PySide6 is absent, install a complete stub module.
     numpy / matplotlib / pyvista stubs are always installed under their real
     names so nmr_analysis can import them without a display.
     """
@@ -237,38 +237,38 @@ def _install_nmr_stubs():
         "QSpinBox",
     ]
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
-    existing_core = sys.modules.get("PyQt6.QtCore")
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
+    existing_core = sys.modules.get("PySide6.QtCore")
 
     if existing_widgets is not None:
-        # Real PyQt6 already loaded — only patch missing names
+        # Real PySide6 already loaded — only patch missing names
         for name in _WIDGET_NAMES:
             if not hasattr(existing_widgets, name):
                 setattr(existing_widgets, name, MagicMock)
         if existing_core is not None and not hasattr(existing_core, "QTimer"):
             existing_core.QTimer = _RecordingTimer
     else:
-        # No PyQt6 yet — build and install full stub
-        _pyqt6 = types.ModuleType("PyQt6")
-        _core = types.ModuleType("PyQt6.QtCore")
+        # No PySide6 yet — build and install full stub
+        _pyside6 = types.ModuleType("PySide6")
+        _core = types.ModuleType("PySide6.QtCore")
         _core.Qt = MagicMock()
         _core.QTimer = _RecordingTimer
-        _widgets = types.ModuleType("PyQt6.QtWidgets")
+        _widgets = types.ModuleType("PySide6.QtWidgets")
         for name in _WIDGET_NAMES:
             setattr(_widgets, name, MagicMock)
         _widgets.QDialog = _Base
-        _pyqt6.QtWidgets = _widgets
-        _pyqt6.QtCore = _core
-        _gui = types.ModuleType("PyQt6.QtGui")
+        _pyside6.QtWidgets = _widgets
+        _pyside6.QtCore = _core
+        _gui = types.ModuleType("PySide6.QtGui")
         _gui.QColor = _QColor
         _gui.QBrush = MagicMock
-        _pyqt6.QtGui = _gui
+        _pyside6.QtGui = _gui
         sys.modules.update(
             {
-                "PyQt6": _pyqt6,
-                "PyQt6.QtWidgets": _widgets,
-                "PyQt6.QtCore": _core,
-                "PyQt6.QtGui": _gui,
+                "PySide6": _pyside6,
+                "PySide6.QtWidgets": _widgets,
+                "PySide6.QtCore": _core,
+                "PySide6.QtGui": _gui,
             }
         )
 
@@ -329,6 +329,20 @@ def _install_nmr_stubs():
 
     _utils_mod.save_json_atomic = _save_json_atomic
 
+    def _notify(owner, message, timeout=3000):
+        candidate = owner
+        for _ in range(4):
+            context = getattr(candidate, "context", None)
+            if context is not None and hasattr(context, "show_status_message"):
+                context.show_status_message(message, timeout)
+                return True
+            candidate = getattr(candidate, "parent_dlg", None)
+            if candidate is None:
+                break
+        return False
+
+    _utils_mod.notify = _notify
+
     _custom_ref = types.ModuleType("orca_result_analyzer_rust.nmr_custom_ref_dialog")
     _custom_ref.CustomReferenceDialog = MagicMock
 
@@ -359,8 +373,24 @@ def _install_nmr_stubs():
     )
 
 
+def _load_sibling(name):
+    """Load orca_result_analyzer_rust/<name>.py as orca_result_analyzer_rust.<name>."""
+    mod_name = f"orca_result_analyzer_rust.{name}"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    path = os.path.join(_SRC_DIR, "orca_result_analyzer_rust", f"{name}.py")
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "orca_result_analyzer_rust"
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _load_nmr():
     _install_nmr_stubs()
+    for _name in ("settings", "nmr_merge", "nmr_plot", "nmr_export"):
+        _load_sibling(_name)
     path = os.path.join(_SRC_DIR, "orca_result_analyzer_rust", "nmr_analysis.py")
     spec = importlib.util.spec_from_file_location("nmr_analysis_fix_mod", path)
     mod = importlib.util.module_from_spec(spec)
@@ -518,9 +548,10 @@ def _install_mo_stubs():
         "QSpinBox",
         "QCheckBox",
         "QComboBox",
+        "QMenu",
     ]
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
 
     if existing_widgets is not None:
         # Patch whatever is already there
@@ -531,27 +562,27 @@ def _install_mo_stubs():
                 else:
                     setattr(existing_widgets, name, MagicMock)
     else:
-        _pyqt6_mo = types.ModuleType("PyQt6")
-        _core_mo = types.ModuleType("PyQt6.QtCore")
+        _pyside6_mo = types.ModuleType("PySide6")
+        _core_mo = types.ModuleType("PySide6.QtCore")
         _core_mo.Qt = MagicMock()
-        _widgets_mo = types.ModuleType("PyQt6.QtWidgets")
+        _widgets_mo = types.ModuleType("PySide6.QtWidgets")
         for name in _MO_WIDGET_NAMES:
             if name in ["QWidget", "QDialog"]:
                 setattr(_widgets_mo, name, _Base)
             else:
                 setattr(_widgets_mo, name, MagicMock)
-        _pyqt6_mo.QtWidgets = _widgets_mo
-        _pyqt6_mo.QtCore = _core_mo
-        _gui_mo = types.ModuleType("PyQt6.QtGui")
+        _pyside6_mo.QtWidgets = _widgets_mo
+        _pyside6_mo.QtCore = _core_mo
+        _gui_mo = types.ModuleType("PySide6.QtGui")
         _gui_mo.QColor = _QColor
         _gui_mo.QBrush = MagicMock
-        _pyqt6_mo.QtGui = _gui_mo
+        _pyside6_mo.QtGui = _gui_mo
         sys.modules.update(
             {
-                "PyQt6": _pyqt6_mo,
-                "PyQt6.QtWidgets": _widgets_mo,
-                "PyQt6.QtCore": _core_mo,
-                "PyQt6.QtGui": _gui_mo,
+                "PySide6": _pyside6_mo,
+                "PySide6.QtWidgets": _widgets_mo,
+                "PySide6.QtCore": _core_mo,
+                "PySide6.QtGui": _gui_mo,
             }
         )
 
@@ -766,11 +797,12 @@ class TestNMRMergeSelectedPeaksSymbols(unittest.TestCase):
     (previously None entered the set and ', '.join(...) raised TypeError)."""
 
     def setUp(self):
-        self._orig_msgbox = _nmr_mod.QMessageBox
-        _nmr_mod.QMessageBox = MagicMock()
+        self._merge_mod = sys.modules["orca_result_analyzer_rust.nmr_merge"]
+        self._orig_msgbox = self._merge_mod.QMessageBox
+        self._merge_mod.QMessageBox = MagicMock()
 
     def tearDown(self):
-        _nmr_mod.QMessageBox = self._orig_msgbox
+        self._merge_mod.QMessageBox = self._orig_msgbox
 
     def test_missing_symbol_does_not_block_merge_or_crash(self):
         data = [
@@ -782,7 +814,7 @@ class TestNMRMergeSelectedPeaksSymbols(unittest.TestCase):
 
         dlg.merge_selected_peaks()  # crashed with TypeError before the fix
 
-        _nmr_mod.QMessageBox.critical.assert_not_called()
+        self._merge_mod.QMessageBox.critical.assert_not_called()
         self.assertEqual(dlg.merged_peaks, [{"indices": [0, 1]}])
         # v3.9.1: merges are no longer auto-saved — only flagged dirty
         dlg.save_merged_peaks.assert_not_called()
@@ -799,8 +831,8 @@ class TestNMRMergeSelectedPeaksSymbols(unittest.TestCase):
 
         dlg.merge_selected_peaks()
 
-        _nmr_mod.QMessageBox.critical.assert_called_once()
-        msg = _nmr_mod.QMessageBox.critical.call_args[0][2]
+        self._merge_mod.QMessageBox.critical.assert_called_once()
+        msg = self._merge_mod.QMessageBox.critical.call_args[0][2]
         self.assertIn("H", msg)
         self.assertIn("C", msg)
         self.assertEqual(dlg.merged_peaks, [])
@@ -815,7 +847,7 @@ class TestNMRMergeSelectedPeaksSymbols(unittest.TestCase):
 
         dlg.merge_selected_peaks()
 
-        _nmr_mod.QMessageBox.critical.assert_not_called()
+        self._merge_mod.QMessageBox.critical.assert_not_called()
         self.assertEqual(dlg.merged_peaks, [{"indices": [0, 1]}])
 
 
@@ -826,11 +858,12 @@ class TestNMRMergeSelectedPeaksSymbols(unittest.TestCase):
 
 class TestNMRMergeExplicitSave(unittest.TestCase):
     def setUp(self):
-        self._orig_msgbox = _nmr_mod.QMessageBox
-        _nmr_mod.QMessageBox = MagicMock()
+        self._merge_mod = sys.modules["orca_result_analyzer_rust.nmr_merge"]
+        self._orig_msgbox = self._merge_mod.QMessageBox
+        self._merge_mod.QMessageBox = MagicMock()
 
     def tearDown(self):
-        _nmr_mod.QMessageBox = self._orig_msgbox
+        self._merge_mod.QMessageBox = self._orig_msgbox
 
     def _dirty_dialog(self):
         data = [
@@ -906,6 +939,18 @@ class TestNMRCloseEventSavePrompt(unittest.TestCase):
         self.msgbox.question.assert_called_once()
         dlg.save_merged_peaks.assert_called_once()
         self.assertFalse(dlg._merged_dirty)
+
+    def test_failed_save_prevents_close_and_keeps_changes_dirty(self):
+        dlg = self._closing_dialog(dirty=True)
+        dlg.save_merged_peaks.return_value = False
+        self.msgbox.question.return_value = 4
+        event = MagicMock()
+        dlg.closeEvent(event)
+        self.assertTrue(dlg._merged_dirty)
+        event.ignore.assert_called_once()
+        event.accept.assert_not_called()
+        dlg.clear_atom_labels.assert_not_called()
+        self.assertTrue(dlg.sel_timer.isActive())
 
     def test_dirty_close_discard_choice_does_not_save(self):
         dlg = self._closing_dialog(dirty=True)

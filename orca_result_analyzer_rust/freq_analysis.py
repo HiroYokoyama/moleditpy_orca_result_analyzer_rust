@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import (
+"""Vibrational frequency dialog: mode list, 3D vectors, animation and IR/Raman spectrum window."""
+
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -22,16 +24,18 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator,
     QComboBox,
     QSlider,
+    QTabWidget,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 import math
 import numpy as np
 import os
-import json
 import pyvista as pv
 from .spectrum_widget import SpectrumWidget
-from .utils import get_default_export_path, save_json_atomic
+from .gif_export import Image, HAS_PIL, encode_frames_to_gif
+from .utils import get_default_export_path, notify
+from .settings import load_section, save_section
 import logging
 
 try:
@@ -39,18 +43,12 @@ try:
 except ImportError:
     Point3D = None
 
-try:
-    from PIL import Image
-
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
 
 class ResetSlider(QSlider):
     """QSlider that resets to 0 when double-clicked."""
 
     def mouseDoubleClickEvent(self, event):
+        """Reset the slider value to 0 on double-click."""
         self.setValue(0)
         if hasattr(super(), "mouseDoubleClickEvent"):
             super().mouseDoubleClickEvent(event)
@@ -79,14 +77,13 @@ class FreqSpectrumWindow(QWidget):
         self.load_settings()
 
     def load_settings(self):
+        """Restore the spectrum's sigma/sticks/markers/auto-range settings from the shared settings file."""
         if not self.freq_dialog:
             return
         settings_file = self.freq_dialog.settings_file
         if os.path.exists(settings_file):
+            settings = load_section(settings_file, "freq_settings")
             try:
-                with open(settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-                settings = all_settings.get("freq_settings", {})
                 if "spec_sigma" in settings:
                     self.spin_sigma.setValue(float(settings["spec_sigma"]))
                 if "spec_sticks" in settings:
@@ -97,10 +94,14 @@ class FreqSpectrumWindow(QWidget):
                     self.chk_auto_x.setChecked(bool(settings["spec_auto_x"]))
                 if "spec_auto_y" in settings:
                     self.chk_auto_y.setChecked(bool(settings["spec_auto_y"]))
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (KeyError, TypeError, ValueError) as e:
+                logging.warning(
+                    "Frequency analysis: could not load spectrum display settings: %s",
+                    e,
+                )
 
     def init_ui(self):
+        """Build the spectrum widget, range/type controls and PNG/CSV/sticks export buttons."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
@@ -262,15 +263,18 @@ class FreqSpectrumWindow(QWidget):
         self.switch_spectrum_type()
 
     def on_spectrum_clicked(self, item):
+        """Forward a clicked spectrum peak to the parent dialog to select the matching mode."""
         if self.freq_dialog:
             self.freq_dialog.select_mode_by_item(item)
 
     def set_scaling_params(self, a, b):
+        """Store the frequency scaling factors and rebuild the plotted data."""
         self.scaling_a = a
         self.scaling_b = b
         self.update_data()
 
     def update_data(self):
+        """Rebuild the spectrum's plotted data by re-applying the current scaling factors."""
         # Re-calc scaled data
         scaled_data = []
         for i, f in enumerate(self.frequencies):
@@ -283,11 +287,13 @@ class FreqSpectrumWindow(QWidget):
         self.spectrum.set_data(scaled_data)
 
     def toggle_invert(self):
+        """Apply the Rev. X / Rev. Y checkbox states to the spectrum widget's axis inversion."""
         self.spectrum.invert_x = self.chk_invert_x.isChecked()
         self.spectrum.invert_y = self.chk_invert_y.isChecked()
         self.spectrum.update()
 
     def switch_spectrum_type(self):
+        """Switch the plotted axis between IR and Raman, resetting axis units and default inversion."""
         # Trigger update data to ensure scaling is applied
         is_raman = self.radio_raman.isChecked()
         if is_raman:
@@ -309,6 +315,7 @@ class FreqSpectrumWindow(QWidget):
         self.update_data()  # Will set data and update
 
     def toggle_auto_y(self):
+        """Enable/disable the Y-range spin boxes and apply auto or manual Y range to the spectrum."""
         is_auto = self.chk_auto_y.isChecked()
         self.spin_y_min.setEnabled(not is_auto)
         self.spin_y_max.setEnabled(not is_auto)
@@ -318,6 +325,7 @@ class FreqSpectrumWindow(QWidget):
             self.update_range()
 
     def update_range(self):
+        """Apply the manual Y-range spin box values to the spectrum, unless Auto Y is checked."""
         if self.chk_auto_y.isChecked():
             return
         ymin = self.spin_y_min.value()
@@ -325,6 +333,7 @@ class FreqSpectrumWindow(QWidget):
         self.spectrum.set_y_range(ymin, ymax)
 
     def toggle_auto_x(self):
+        """Enable/disable the X-range spin boxes and apply auto or manual X range to the spectrum."""
         is_auto = self.chk_auto_x.isChecked()
         self.spin_x_min.setEnabled(not is_auto)
         self.spin_x_max.setEnabled(not is_auto)
@@ -347,6 +356,7 @@ class FreqSpectrumWindow(QWidget):
             self.update_x_range()
 
     def update_x_range(self):
+        """Apply the manual X-range spin box values to the spectrum, unless Auto X is checked."""
         if self.chk_auto_x.isChecked():
             return
         xmin = self.spin_x_min.value()
@@ -354,6 +364,7 @@ class FreqSpectrumWindow(QWidget):
         self.spectrum.set_x_range(xmin, xmax)
 
     def on_spectrum_range_changed(self, xmin, xmax, ymin, ymax, is_manual):
+        """Sync the range spin boxes to a zoom/pan on the spectrum, unchecking Auto on manual interaction."""
         # Update spin boxes to match zoom
         self.spin_x_min.blockSignals(True)
         self.spin_x_max.blockSignals(True)
@@ -385,6 +396,7 @@ class FreqSpectrumWindow(QWidget):
         self.spin_y_max.blockSignals(False)
 
     def save_png(self):
+        """Prompt for a path and save the spectrum plot as a PNG image."""
         default_path = get_default_export_path(
             self.freq_dialog.mw.init_manager.current_file_path,
             suffix="_vib_spectrum",
@@ -397,6 +409,7 @@ class FreqSpectrumWindow(QWidget):
             self.spectrum.save_png(path)
 
     def save_csv(self):
+        """Prompt for a path and save the plotted spectrum curve as CSV."""
         default_path = get_default_export_path(
             self.freq_dialog.mw.init_manager.current_file_path,
             suffix="_vib_data",
@@ -408,16 +421,12 @@ class FreqSpectrumWindow(QWidget):
         if path:
             success = self.spectrum.save_csv(path)
             if success:
-                if self.freq_dialog and self.freq_dialog.context:
-                    self.freq_dialog.context.show_status_message(
-                        f"Data saved to: {os.path.basename(path)}", 5000
-                    )
-                else:
-                    logging.info("Data saved to: %s", path)
+                notify(self, f"Data saved to: {os.path.basename(path)}", 5000)
             else:
                 QMessageBox.warning(self, "Error", "Failed to save CSV.")
 
     def save_sticks(self):
+        """Prompt for a path and export the raw (unbroadened) stick data as CSV."""
         default_path = get_default_export_path(
             self.freq_dialog.mw.init_manager.current_file_path,
             suffix="_vib_sticks",
@@ -429,16 +438,12 @@ class FreqSpectrumWindow(QWidget):
         if path:
             success = self.spectrum.save_sticks_csv(path)
             if success:
-                if self.freq_dialog and self.freq_dialog.context:
-                    self.freq_dialog.context.show_status_message(
-                        f"Stick data saved to: {os.path.basename(path)}", 5000
-                    )
-                else:
-                    logging.info("Stick data saved to: %s", path)
+                notify(self, f"Stick data saved to: {os.path.basename(path)}", 5000)
             else:
                 QMessageBox.warning(self, "Error", "Failed to export stick data.")
 
     def closeEvent(self, event):
+        """Close the spectrum window (state is kept by the parent FrequencyDialog for reuse)."""
         # No cleanup of its own: the parent FrequencyDialog keeps the
         # reference and reuses this window, checking visibility to decide
         # whether to re-show it.
@@ -446,6 +451,11 @@ class FreqSpectrumWindow(QWidget):
 
 
 class FrequencyDialog(QDialog):
+    """Vibrational frequency dialog: mode list, scaling, 3D vectors and animated displacement."""
+
+    # pylint: disable=attribute-defined-outside-init
+    # Qt pattern: widget attributes are set in init_ui(), called from __init__.
+
     def __init__(self, parent, frequencies, atoms, coords, context=None):
         super().__init__(parent)
         self.mw = parent
@@ -461,6 +471,8 @@ class FrequencyDialog(QDialog):
         self.current_mode_idx = -1
         self.vector_color = "orange"
         self.vector_res = 20
+        self.dipole_color = "magenta"
+        self.dipole_actor = None
 
         # Scaling Params (ax + b)
         self.scaling_a = 1.0
@@ -480,6 +492,7 @@ class FrequencyDialog(QDialog):
         self.init_ui()
 
     def init_ui(self):
+        """Build the mode list, scaling controls, vector appearance tabs and animation controls."""
         main_layout = QVBoxLayout(self)
 
         # 1. Frequency List Section
@@ -541,8 +554,17 @@ class FrequencyDialog(QDialog):
         main_layout.addWidget(list_group)
 
         # 2. 3D Appearance (Vectors)
+        # Two independent arrow overlays: the per-atom displacements of the
+        # mode, and the single molecule-wide dipole derivative. They are drawn
+        # at very different scales and are usually wanted one at a time, so
+        # each keeps its own scale/colour rather than sharing one set.
         vec_group = QGroupBox("3D Vector Appearance")
-        vec_layout = QVBoxLayout(vec_group)
+        vec_group_layout = QVBoxLayout(vec_group)
+        self.vec_tabs = QTabWidget()
+        vec_group_layout.addWidget(self.vec_tabs)
+
+        mode_tab = QWidget()
+        vec_layout = QVBoxLayout(mode_tab)
 
         vec_top_row = QHBoxLayout()
         self.chk_vector = QCheckBox("Show Vectors")
@@ -574,8 +596,83 @@ class FrequencyDialog(QDialog):
         )
         self.btn_vec_color.clicked.connect(self.pick_color)
         vec_bot_row.addWidget(self.btn_vec_color)
+
+        vec_bot_row.addWidget(QLabel(" Alpha:"))
+        self.spin_vec_alpha = QDoubleSpinBox()
+        self.spin_vec_alpha.setRange(0.05, 1.0)
+        self.spin_vec_alpha.setSingleStep(0.05)
+        self.spin_vec_alpha.setValue(1.0)
+        self.spin_vec_alpha.setToolTip(
+            "Arrow opacity. Below 1.0 the structure stays visible through the "
+            "arrows, which helps when they cover the molecule."
+        )
+        self.spin_vec_alpha.valueChanged.connect(self.update_view)
+        vec_bot_row.addWidget(self.spin_vec_alpha)
         vec_bot_row.addStretch()
         vec_layout.addLayout(vec_bot_row)
+        vec_layout.addStretch()
+        self.vec_tabs.addTab(mode_tab, "Mode Vectors")
+
+        dipole_tab = QWidget()
+        dip_layout = QVBoxLayout(dipole_tab)
+
+        dip_top_row = QHBoxLayout()
+        self.chk_dipole = QCheckBox("Show Dipole Change")
+        self.chk_dipole.setChecked(False)
+        self.chk_dipole.setToolTip(
+            "Draw this mode's transition dipole derivative (ORCA's TX/TY/TZ) as a\n"
+            "single arrow from the molecular centroid. Its direction is the way\n"
+            "the dipole moves as the mode is walked; an IR-inactive mode has\n"
+            "essentially none, which is why its arrow disappears."
+        )
+        self.chk_dipole.stateChanged.connect(self.update_view)
+        dip_top_row.addWidget(self.chk_dipole)
+
+        dip_top_row.addWidget(QLabel("Scale:"))
+        self.spin_dip_scale = QDoubleSpinBox()
+        self.spin_dip_scale.setRange(0.1, 200.0)
+        self.spin_dip_scale.setValue(20.0)
+        self.spin_dip_scale.setToolTip(
+            "Arrow length per sqrt(a.u.). The derivative is a few hundredths of\n"
+            "an atomic unit, so this needs to be far larger than the mode-vector\n"
+            "scale to give an arrow of comparable size."
+        )
+        self.spin_dip_scale.valueChanged.connect(self.update_view)
+        dip_top_row.addWidget(self.spin_dip_scale)
+        dip_layout.addLayout(dip_top_row)
+
+        dip_bot_row = QHBoxLayout()
+        dip_bot_row.addWidget(QLabel("Resolution:"))
+        self.spin_dip_res = QSpinBox()
+        self.spin_dip_res.setRange(3, 100)
+        self.spin_dip_res.setValue(20)
+        self.spin_dip_res.valueChanged.connect(self.update_view)
+        dip_bot_row.addWidget(self.spin_dip_res)
+
+        dip_bot_row.addWidget(QLabel(" Color:"))
+        self.btn_dip_color = QPushButton()
+        self.btn_dip_color.setFixedWidth(60)
+        self.btn_dip_color.setStyleSheet(
+            f"background-color: {self.dipole_color}; border: 1px solid gray; height: 20px;"
+        )
+        self.btn_dip_color.clicked.connect(self.pick_dipole_color)
+        dip_bot_row.addWidget(self.btn_dip_color)
+
+        dip_bot_row.addWidget(QLabel(" Alpha:"))
+        self.spin_dip_alpha = QDoubleSpinBox()
+        self.spin_dip_alpha.setRange(0.05, 1.0)
+        self.spin_dip_alpha.setSingleStep(0.05)
+        self.spin_dip_alpha.setValue(1.0)
+        self.spin_dip_alpha.valueChanged.connect(self.update_view)
+        dip_bot_row.addWidget(self.spin_dip_alpha)
+
+        self.lbl_dipole = QLabel("")
+        self.lbl_dipole.setStyleSheet("color: gray;")
+        dip_bot_row.addWidget(self.lbl_dipole)
+        dip_bot_row.addStretch()
+        dip_layout.addLayout(dip_bot_row)
+        dip_layout.addStretch()
+        self.vec_tabs.addTab(dipole_tab, "Dipole Change")
 
         main_layout.addWidget(vec_group)
 
@@ -659,6 +756,7 @@ class FrequencyDialog(QDialog):
         self.load_settings()
 
     def populate_list(self):
+        """Fill the mode tree, hiding leading translation/rotation modes and colouring imaginary ones red."""
         self.tree.clear()
         a = self.spin_sf_a.value()
         b = self.spin_sf_b.value()
@@ -712,6 +810,7 @@ class FrequencyDialog(QDialog):
             self.tree.addTopLevelItem(item)
 
     def update_preset_combo(self):
+        """Rebuild the preset combo box from the default and custom presets, preserving the current selection."""
         self.combo_preset.blockSignals(True)
         current = self.combo_preset.currentText()
         self.combo_preset.clear()
@@ -743,7 +842,8 @@ class FrequencyDialog(QDialog):
         self.combo_preset.blockSignals(False)
 
     def save_custom_preset(self):
-        from PyQt6.QtWidgets import QInputDialog
+        """Prompt for a name and save the current scaling factors as a new custom preset."""
+        from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(self, "Save Scaling Preset", "Preset Name:")
         if ok and name:
@@ -758,7 +858,9 @@ class FrequencyDialog(QDialog):
             self.combo_preset.setCurrentText(name)
             self.save_settings()
 
-    def apply_preset(self, index=None):
+    def apply_preset(self, _index=None):
+        """Apply the selected scaling preset's a/b values, or enable manual editing for "Manual"."""
+        # _index absorbs QComboBox.activated(int); the preset is read from the combo.
         preset = self.combo_preset.currentText()
         is_manual = preset == "Manual"
         self.spin_sf_a.setEnabled(is_manual)
@@ -780,6 +882,7 @@ class FrequencyDialog(QDialog):
             self.update_data()
 
     def update_data(self):
+        """Re-apply the current scaling factors to the mode list and the open spectrum window."""
         # Update list values (scaling); col 2 (Unscaled) is static — never touched here
         a = self.spin_sf_a.value()
         b = self.spin_sf_b.value()
@@ -801,6 +904,7 @@ class FrequencyDialog(QDialog):
             self.spectrum_win.set_scaling_params(a, b)
 
     def open_spectrum(self):
+        """Open the IR/Raman spectrum window, creating it on first use, and bring it to the front."""
         if self.spectrum_win is None:
             self.spectrum_win = FreqSpectrumWindow(self, self.frequencies)
             # Apply current scaling params
@@ -814,6 +918,7 @@ class FrequencyDialog(QDialog):
             self.spectrum_win.raise_()
 
     def select_mode_by_item(self, item):
+        """Select the mode tree row matching a spectrum peak's original index, or clear the selection."""
         if item is None:
             if self.spectrum_win:
                 self.spectrum_win.spectrum.set_selected_item(None)
@@ -841,11 +946,17 @@ class FrequencyDialog(QDialog):
                         tree_item, QAbstractItemView.ScrollHint.PositionAtCenter
                     )
                     break
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, TypeError, ValueError) as e:
+                logging.debug(
+                    "Frequency analysis: could not match tree item to mode index %d: %s",
+                    target_idx,
+                    e,
+                )
             it += 1
 
-    def on_mode_selected(self, current, previous):
+    def on_mode_selected(self, current, previous):  # pylint: disable=unused-argument
+        # previous is unused: Qt's currentItemChanged signature, only the new item is needed.
+        """Handle a mode tree selection change: sync the spectrum highlight and redraw the 3D view."""
         if not current:
             return
         idx = int(current.text(0))
@@ -875,6 +986,7 @@ class FrequencyDialog(QDialog):
             self.start_animation()
 
     def update_view(self):
+        """Redraw the selected mode's displacement vectors and dipole arrow at the resting geometry."""
         if self.current_mode_idx < 0:
             return
 
@@ -882,12 +994,20 @@ class FrequencyDialog(QDialog):
         if self.vector_actor:
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                logging.debug(
+                    "Frequency analysis: could not remove the old displacement vector actor: %s",
+                    e,
+                )
             self.vector_actor = None
+        self._clear_dipole_actor()
 
         # 2. Reset geometry
         self.reset_geometry()
+
+        # Drawn before the manual-displacement early return: the dipole arrow
+        # describes the mode, not the current frame, so it stays valid there.
+        self.update_dipole_view()
 
         if self.chk_manual_displ.isChecked():
             self.apply_manual_displacement()
@@ -916,14 +1036,86 @@ class FrequencyDialog(QDialog):
             )
             arrows = poly.glyph(orient=True, scale=True, factor=scale, geom=geom)
             self.vector_actor = self.mw.plotter.add_mesh(
-                arrows, color=self.vector_color, name="vib_vectors"
+                arrows,
+                color=self.vector_color,
+                opacity=self.spin_vec_alpha.value(),
+                name="vib_vectors",
             )
 
             self.mw.plotter.render()
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error in FrequencyDialog.update_view: %s", e)
 
+    def _clear_dipole_actor(self):
+        """Remove the dipole-change arrow actor from the 3D view, if one is present."""
+        if getattr(self, "dipole_actor", None) is None:
+            return
+        try:
+            self.mw.plotter.remove_actor(self.dipole_actor)
+        except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+            logging.debug(
+                "Frequency analysis: could not remove the dipole vector actor: %s", e
+            )
+        self.dipole_actor = None
+
+    def update_dipole_view(self):
+        """Draw the selected mode's dipole-change arrow, if it is wanted.
+
+        The vector is ORCA's transition dipole derivative for the mode, in
+        atomic units. It is a single molecule-wide quantity, not a per-atom
+        one, so it is drawn once from the centroid rather than glyphed onto
+        every atom like the displacement vectors.
+        """
+        self._clear_dipole_actor()
+        if not getattr(self, "chk_dipole", None) or not self.chk_dipole.isChecked():
+            if getattr(self, "lbl_dipole", None):
+                self.lbl_dipole.setText("")
+            return
+        if self.current_mode_idx < 0:
+            return
+
+        mode = self.frequencies[self.current_mode_idx]
+        deriv = mode.get("dipole_deriv")
+        if not deriv:
+            # Pre-5.x outputs, or a mode outside the IR table (the six
+            # translations/rotations): say so rather than draw nothing.
+            self.lbl_dipole.setText("not reported for this mode")
+            return
+
+        try:
+            vec = np.array(deriv, dtype=float)
+            magnitude = float(np.linalg.norm(vec))
+            self.lbl_dipole.setText(f"|dμ/dQ| = {magnitude:.4f} a.u.")
+            if magnitude <= 0.0:
+                return
+
+            # Length tracks sqrt(magnitude) -- IR intensity goes as the square
+            # of this vector, so the square root keeps a weak mode visible next
+            # to a strong one instead of vanishing entirely.
+            points = np.array(self.base_coords, dtype=float)
+            if points.size == 0:
+                return
+            centroid = points.mean(axis=0)
+            scale = self.spin_dip_scale.value() * math.sqrt(magnitude)
+
+            poly = pv.PolyData(centroid.reshape(1, 3))
+            poly.point_data["vectors"] = (vec / magnitude).reshape(1, 3)
+            res = self.spin_dip_res.value()
+            geom = pv.Arrow(shaft_resolution=res, tip_resolution=res)
+            arrow = poly.glyph(orient=True, scale=True, factor=scale, geom=geom)
+            self.dipole_actor = self.mw.plotter.add_mesh(
+                arrow,
+                color=self.dipole_color,
+                opacity=self.spin_dip_alpha.value(),
+                name="vib_dipole",
+            )
+            self.mw.plotter.render()
+        except (RuntimeError, AttributeError, KeyError, ValueError, TypeError) as e:
+            logging.warning("Error drawing dipole change vector: %s", e)
+
     def toggle_manual_displacement(self, checked):
+        """Switch between animation playback and the manual displacement slider."""
         self.slider_displ.setEnabled(checked)
         # Disable/enable play buttons
         self.btn_play.setEnabled(not checked)
@@ -942,13 +1134,16 @@ class FrequencyDialog(QDialog):
                 self.update_view()  # Restore vectors
 
     def on_displacement_slider_changed(self):
+        """Re-apply the manual displacement when the slider moves."""
         self.apply_manual_displacement()
 
     def on_amp_changed(self):
+        """Re-apply the manual displacement when the amplitude spin box changes."""
         if self.chk_manual_displ.isChecked():
             self.apply_manual_displacement()
 
     def apply_manual_displacement(self):
+        """Move the 3D structure to the slider's fixed displacement along the selected mode."""
         if self.current_mode_idx < 0:
             return
 
@@ -985,14 +1180,19 @@ class FrequencyDialog(QDialog):
                 if self.vector_actor:
                     try:
                         self.mw.plotter.remove_actor(self.vector_actor)
-                    except Exception as _e:
-                        logging.warning("silenced: %s", _e)
+                    except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                        logging.debug(
+                            "Frequency analysis: could not remove the vector actor when vectors were disabled: %s",
+                            e,
+                        )
                     self.vector_actor = None
 
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error in apply_manual_displacement: %s", e)
 
     def start_animation(self):
+        """Start the mode's displacement animation timer at the current FPS."""
         if self.current_mode_idx < 0:
             return
         if self.is_playing:
@@ -1007,6 +1207,7 @@ class FrequencyDialog(QDialog):
         self.timer.start(int(1000 / fps))
 
     def pause_animation(self):
+        """Stop the animation timer but leave the structure at its current displaced frame."""
         self.is_playing = False
         self.timer.stop()
         self.btn_play.setEnabled(True)
@@ -1014,6 +1215,7 @@ class FrequencyDialog(QDialog):
         self.btn_stop.setEnabled(True)  # Can still stop to reset
 
     def stop_animation(self):
+        """Stop the animation timer and reset the structure to its resting geometry."""
         self.is_playing = False
         self.timer.stop()
         self.animation_step = 0  # Reset phase
@@ -1026,10 +1228,12 @@ class FrequencyDialog(QDialog):
         self.btn_stop.setEnabled(False)
 
     def update_fps(self):
+        """Apply a changed FPS spin box value to the running animation timer."""
         if self.is_playing:
             self.timer.setInterval(int(1000 / self.spin_fps.value()))
 
     def animate_frame(self):
+        """Advance the animation by one timer tick and redraw the structure at the new sinusoidal phase."""
         if self.current_mode_idx < 0:
             return
 
@@ -1062,7 +1266,8 @@ class FrequencyDialog(QDialog):
             if self.chk_vector.isChecked():
                 self.update_vectors_at_displaced_position()
 
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error in animate_frame: %s", e)
 
     def update_vectors_at_displaced_position(self):
@@ -1070,8 +1275,11 @@ class FrequencyDialog(QDialog):
         if self.vector_actor:
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                logging.debug(
+                    "Frequency analysis: could not remove the vector actor before redraw: %s",
+                    e,
+                )
             self.vector_actor = None
 
         vecs = self.frequencies[self.current_mode_idx].get("vector", [])
@@ -1099,6 +1307,7 @@ class FrequencyDialog(QDialog):
                     vecs_array,
                     mag=scale,
                     color=self.vector_color,
+                    opacity=self.spin_vec_alpha.value(),
                     show_scalar_bar=False,
                 )
             else:
@@ -1110,12 +1319,17 @@ class FrequencyDialog(QDialog):
                 )
                 arrows = poly.glyph(orient=True, scale=True, factor=scale, geom=geom)
                 self.vector_actor = self.mw.plotter.add_mesh(
-                    arrows, color=self.vector_color, name="vib_vectors"
+                    arrows,
+                    color=self.vector_color,
+                    opacity=self.spin_vec_alpha.value(),
+                    name="vib_vectors",
                 )
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error updating vectors: %s", e)
 
     def reset_geometry(self):
+        """Restore the 3D structure to the original (unscaled/undisplaced) equilibrium geometry."""
         try:
             mol = self.mw.current_mol
             conf = mol.GetConformer()
@@ -1125,10 +1339,12 @@ class FrequencyDialog(QDialog):
                 self.context.draw_molecule_3d(mol)
             else:
                 self.mw.view_3d_manager.draw_molecule_3d(mol)
-        except Exception as e:
+        except (RuntimeError, AttributeError, TypeError, ValueError) as e:
             logging.warning("Error in reset_geometry: %s", e)
 
+    # pylint: disable=duplicate-code  # Qt setup mirrors traj_analysis.save_gif; gif_export.py stays PySide6-free
     def save_gif(self):
+        """Prompt for GIF settings and export one animation cycle of the selected mode as an animated GIF."""
         if not HAS_PIL:
             QMessageBox.warning(self, "Error", "PIL (Pillow) not installed.")
             return
@@ -1207,9 +1423,9 @@ class FrequencyDialog(QDialog):
             # Generate 20 frames (1 cycle)
             vecs = self.frequencies[self.current_mode_idx].get("vector", [])
             if not vecs:
-                raise Exception("No vectors for this mode")
+                raise ValueError("No vectors for this mode")
 
-            from rdkit.Geometry import Point3D
+            from rdkit.Geometry import Point3D  # pylint: disable=no-name-in-module
 
             mol = self.mw.current_mol
             conf = mol.GetConformer()
@@ -1243,61 +1459,25 @@ class FrequencyDialog(QDialog):
                     images.append(img)
 
             if images:
-                duration = int(1000 / fps)
-                processed_images = []
-                for img in images:
-                    if use_hq:
-                        if transparent:
-                            # Alpha preservation with adaptive palette
-                            alpha = img.split()[3]
-                            img_rgb = img.convert("RGB")
-                            # Quantize to 255 colors to leave room for transparency
-                            img_p = img_rgb.convert(
-                                "P", palette=Image.Palette.ADAPTIVE, colors=255
-                            )
-                            # Set transparency
-                            mask = Image.eval(alpha, lambda a: 255 if a <= 128 else 0)
-                            img_p.paste(255, mask)
-                            img_p.info["transparency"] = 255
-                            processed_images.append(img_p)
-                        else:
-                            processed_images.append(
-                                img.convert(
-                                    "P", palette=Image.Palette.ADAPTIVE, colors=256
-                                )
-                            )
-                    else:
-                        if transparent:
-                            processed_images.append(img.convert("RGBA"))
-                        else:
-                            processed_images.append(img.convert("RGB"))
+                encode_frames_to_gif(images, path, fps, transparent, use_hq)
+                notify(self, f"GIF saved to: {os.path.basename(path)}", 5000)
 
-                processed_images[0].save(
-                    path,
-                    save_all=True,
-                    append_images=processed_images[1:],
-                    duration=duration,
-                    loop=0,
-                    disposal=2,
-                )
-                if self.context:
-                    self.context.show_status_message(
-                        f"GIF saved to: {os.path.basename(path)}", 5000
-                    )
-                else:
-                    logging.info("GIF saved to: %s", path)
-
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to save GIF:\n{e}")
         finally:
             self._gif_saving = False
-            self.btn_gif.setEnabled(True)
+            # Manual displacement mode keeps GIF disabled (toggle_manual_displacement).
+            self.btn_gif.setEnabled(HAS_PIL and not self.chk_manual_displ.isChecked())
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self.reset_geometry()
             if was_playing:
                 self.start_animation()
 
+    # pylint: enable=duplicate-code
+
     def pick_color(self):
+        """Prompt for a colour and apply it to the mode displacement vectors."""
         color = QColorDialog.getColor(
             QColor(self.vector_color), self, "Select Vector Color"
         )
@@ -1306,15 +1486,30 @@ class FrequencyDialog(QDialog):
             self.btn_vec_color.setStyleSheet(f"background-color: {self.vector_color};")
             self.update_view()
 
+    def pick_dipole_color(self):
+        """Prompt for a colour and apply it to the dipole-change vector."""
+        color = QColorDialog.getColor(
+            QColor(self.dipole_color), self, "Select Dipole Vector Color"
+        )
+        if color.isValid():
+            self.dipole_color = color.name()
+            self.btn_dip_color.setStyleSheet(
+                f"background-color: {self.dipole_color}; border: 1px solid gray; height: 20px;"
+            )
+            self.update_view()
+
     def on_res_changed(self, val):
+        """Apply a changed arrow resolution spin box value and redraw the vectors."""
         self.vector_res = val
         self.update_view()
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
     def closeEvent(self, event):
+        """Stop animation, remove 3D actors, close the spectrum window and persist settings."""
         if self.chk_manual_displ.isChecked():
             self.is_playing = False
             self.timer.stop()
@@ -1325,8 +1520,14 @@ class FrequencyDialog(QDialog):
         if self.vector_actor:
             try:
                 self.mw.plotter.remove_actor(self.vector_actor)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                logging.debug(
+                    "Frequency analysis: could not remove the vector actor on close: %s",
+                    e,
+                )
+        # The dipole arrow is a separate actor and outlives the dialog if it
+        # is not removed here -- it would stay in the 3D view after closing.
+        self._clear_dipole_actor()
         if self.spectrum_win:
             self.spectrum_win.close()
 
@@ -1334,16 +1535,14 @@ class FrequencyDialog(QDialog):
         event.accept()
 
     def close_clean(self):
+        """Close the dialog via the Close button, routing through closeEvent cleanup."""
         self.close()
 
     def load_settings(self):
+        """Restore scaling, presets and vector/animation appearance from the shared settings file."""
         if os.path.exists(self.settings_file):
+            settings = load_section(self.settings_file, "freq_settings")
             try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-
-                settings = all_settings.get("freq_settings", {})
-
                 if "sf_a" in settings:
                     self.spin_sf_a.setValue(float(settings["sf_a"]))
                 elif "sf" in settings:
@@ -1370,23 +1569,32 @@ class FrequencyDialog(QDialog):
                     self.btn_vec_color.setStyleSheet(
                         f"background-color: {self.vector_color}; border: 1px solid gray; height: 20px;"
                     )
+                if "show_dipole" in settings:
+                    self.chk_dipole.setChecked(bool(settings["show_dipole"]))
+                if "dip_scale" in settings:
+                    self.spin_dip_scale.setValue(float(settings["dip_scale"]))
+                if "dip_res" in settings:
+                    self.spin_dip_res.setValue(int(settings["dip_res"]))
+                if "vec_alpha" in settings:
+                    self.spin_vec_alpha.setValue(float(settings["vec_alpha"]))
+                if "dip_alpha" in settings:
+                    self.spin_dip_alpha.setValue(float(settings["dip_alpha"]))
+                if "dip_color" in settings:
+                    self.dipole_color = settings["dip_color"]
+                    self.btn_dip_color.setStyleSheet(
+                        f"background-color: {self.dipole_color}; border: 1px solid gray; height: 20px;"
+                    )
                 if "amp" in settings:
                     self.spin_amp.setValue(float(settings["amp"]))
                 if "fps" in settings:
                     self.spin_fps.setValue(int(settings["fps"]))
 
-            except Exception as e:
+            # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logging.warning("Error loading freq settings: %s", e)
 
     def save_settings(self):
-        all_settings = {}
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-
+        """Persist scaling, presets and vector/animation appearance (and spectrum settings, if open) to disk."""
         freq_settings = {
             "sf_a": self.spin_sf_a.value(),
             "sf_b": self.spin_sf_b.value(),
@@ -1395,6 +1603,12 @@ class FrequencyDialog(QDialog):
             "show_vec": self.chk_vector.isChecked(),
             "vec_res": self.spin_vec_res.value(),
             "vec_color": self.vector_color,
+            "show_dipole": self.chk_dipole.isChecked(),
+            "dip_scale": self.spin_dip_scale.value(),
+            "dip_res": self.spin_dip_res.value(),
+            "dip_color": self.dipole_color,
+            "vec_alpha": self.spin_vec_alpha.value(),
+            "dip_alpha": self.spin_dip_alpha.value(),
             "amp": self.spin_amp.value(),
             "fps": self.spin_fps.value(),
         }
@@ -1410,18 +1624,10 @@ class FrequencyDialog(QDialog):
                     "spec_auto_y": self.spectrum_win.chk_auto_y.isChecked(),
                 }
             )
-        elif "freq_settings" in all_settings:
+        else:
             # Preserve spectrum settings if window is not currently open
-            prev_spec = {
-                k: v
-                for k, v in all_settings["freq_settings"].items()
-                if k.startswith("spec_")
-            }
+            prev = load_section(self.settings_file, "freq_settings")
+            prev_spec = {k: v for k, v in prev.items() if k.startswith("spec_")}
             freq_settings.update(prev_spec)
 
-        all_settings["freq_settings"] = freq_settings
-
-        try:
-            save_json_atomic(self.settings_file, all_settings)
-        except Exception as e:
-            logging.warning("Error saving freq settings: %s", e)
+        save_section(self.settings_file, "freq_settings", freq_settings)

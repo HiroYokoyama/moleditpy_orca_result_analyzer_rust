@@ -253,6 +253,38 @@ class TestAxesCallback(unittest.TestCase):
         self.w._on_axes_changed(self.w.canvas.axes)
         self.w.range_changed.emit.assert_not_called()
 
+    @staticmethod
+    def _listener_count(widget):
+        registry = widget.canvas.axes.callbacks.callbacks
+        return sum(
+            len(registry.get(sig, {})) for sig in ("xlim_changed", "ylim_changed")
+        )
+
+    def test_replotting_leaves_exactly_one_listener_per_signal(self):
+        """Axes.clear() installs a fresh registry, so connections must not pile up."""
+        for _ in range(4):
+            self.w.plot_spectrum()
+        self.assertEqual(self._listener_count(self.w), 2)
+
+    def test_an_empty_replot_keeps_the_axes_wired(self):
+        """The "No Data" path returns early -- it must still leave listeners.
+
+        clear() drops the registry at the top of plot_spectrum, so returning
+        before reconnecting left the axes with nothing listening: the toolbar's
+        zoom stopped emitting range_changed and the host's range boxes silently
+        stopped tracking the view until the next non-empty plot.
+        """
+        self.w.plot_spectrum()
+        self.w.data_list = []
+        self.w.plot_spectrum()
+        self.assertEqual(self._listener_count(self.w), 2)
+
+        self.w._is_plotting = False
+        self.w._initial_plot_done = True
+        self.w.range_changed = MagicMock()
+        self.w.canvas.axes.set_xlim(300, 350)
+        self.w.range_changed.emit.assert_called()
+
 
 class TestStickExport(unittest.TestCase):
     def setUp(self):
@@ -333,3 +365,33 @@ class TestCurveCsvKeepsNegativeIntensity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStickCsvMatchesPlot(unittest.TestCase):
+    def test_raw_stick_key_and_units_are_exported(self):
+        import csv
+        for key, unit, value in [("osc_len", "Oscillator strength", 0.1), ("rot", "Rotatory strength", -2.0)]:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                widget = _widget([{ "energy_nm": 400, "processed_y": 23150000.0, key: value}], y_key="processed_y")
+                widget.y_key_sticks = key
+                widget.y_unit_sticks = unit
+                widget.y_unit = "Curve units"
+                path = os.path.join(tmp, "sticks.csv")
+                self.assertTrue(widget.save_sticks_csv(path))
+                with open(path, encoding="utf-8") as file:
+                    rows = list(csv.reader(file))
+                self.assertEqual(rows[0], ["Wavelength (nm)", unit])
+                self.assertEqual(float(rows[1][1]), value)
+
+    def test_fallback_uses_curve_key_and_units(self):
+        import csv
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = _widget()
+            widget.y_key_sticks = None
+            widget.y_unit = "Oscillator strength"
+            path = os.path.join(tmp, "sticks.csv")
+            self.assertTrue(widget.save_sticks_csv(path))
+            with open(path, encoding="utf-8") as file:
+                rows = list(csv.reader(file))
+            self.assertEqual(rows[0][1], "Oscillator strength")
+            self.assertEqual([float(row[1]) for row in rows[1:]], [0.2, 0.05])

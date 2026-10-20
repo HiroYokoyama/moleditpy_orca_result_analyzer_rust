@@ -1,8 +1,10 @@
+"""Interactive orbital energy level diagram with zoom, pan and cube-file lookup."""
+
 import glob
 import os
 import math
 import logging
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -15,16 +17,15 @@ from PyQt6.QtWidgets import (
     QApplication,
     QToolTip,
 )
-from PyQt6.QtCore import Qt, QRect
-from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QAction
+from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QAction
 
-try:
-    import nist
-except ImportError:
-    nist = None
+#: CODATA 2018 Hartree energy in eV.
+HARTREE_TO_EV = 27.211386245988
 
 
 def calculate_arrow_shifts(items, val_to_y, threshold=15, distance=20):
+    """Compute horizontal offsets so overlapping levels' electron arrows fan out."""
     shifts = {}
     if not items:
         return shifts
@@ -59,6 +60,11 @@ def calculate_arrow_shifts(items, val_to_y, threshold=15, distance=20):
 
 
 class EnergyDiagramDialog(QDialog):
+    """Interactive orbital energy level diagram with zoom, pan and cube-file lookup."""
+
+    # pylint: disable=attribute-defined-outside-init
+    # Qt/PyVista pattern: label/actor/state attrs are created lazily, not in __init__.
+
     def __init__(self, mo_data, parent=None, result_dir=None):
         super().__init__(parent)
         self.result_dir = result_dir
@@ -173,23 +179,19 @@ class EnergyDiagramDialog(QDialog):
         # Store for double-click reset
         self.homo_energy = h_e
         self.lumo_energy = l_e
-        gap_center = (h_e + l_e) / 2
+        self.current_min, self.current_max = self._default_view()
 
-        # User Request: Default view is 3x the HOMO-LUMO gap, centered on gap
-        gap = abs(l_e - h_e)
+    def _default_view(self) -> tuple[float, float]:
+        """(min, max) energy window: 3x the HOMO-LUMO gap centred on the gap, at least 0.2 Eh."""
+        gap_center = (self.homo_energy + self.lumo_energy) / 2
+        gap = abs(self.lumo_energy - self.homo_energy)
         if gap < 0.01:
             gap = 0.05  # Fallback for near-degeneracy
-
-        target_span = gap * 3.0
-
-        # Ensure reasonable minimum view if gap is tiny
-        if target_span < 0.2:
-            target_span = 0.2
-
-        self.current_min = gap_center - target_span / 2.0
-        self.current_max = gap_center + target_span / 2.0
+        target_span = max(gap * 3.0, 0.2)
+        return gap_center - target_span / 2.0, gap_center + target_span / 2.0
 
     def wheelEvent(self, event):
+        """Zoom the energy range on Ctrl+wheel, otherwise pan it."""
         # Zoom with Ctrl + Wheel
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             angle_delta = event.angleDelta().y()
@@ -263,16 +265,15 @@ class EnergyDiagramDialog(QDialog):
         self.current_max += change
         self.update()
 
-    def mouseDoubleClickEvent(self, event):
-        # Reset to 3x HOMO-LUMO gap centered on the gap
+    def mouseDoubleClickEvent(self, event):  # pylint: disable=unused-argument
+        # Qt override signature requires the event argument.
+        """Reset the view to 3x the HOMO-LUMO gap, centered on the gap."""
+        # Same window as on open; the old inline copy lacked the minimum span,
+        # so a degenerate gap collapsed the view to zero height.
         if getattr(self, "homo_energy", None) is not None and hasattr(
             self, "lumo_energy"
         ):
-            gap = abs(self.lumo_energy - self.homo_energy)
-            center = (self.homo_energy + self.lumo_energy) / 2
-            range_size = gap * 3
-            self.current_min = center - range_size / 2
-            self.current_max = center + range_size / 2
+            self.current_min, self.current_max = self._default_view()
         else:
             # Fallback to full view if HOMO/LUMO not available
             self.current_min = self.full_min - 0.05 * (self.full_max - self.full_min)
@@ -280,6 +281,7 @@ class EnergyDiagramDialog(QDialog):
         self.update()
 
     def mousePressEvent(self, event):
+        """Load or generate the orbital under the click, else start a drag-to-zoom."""
         if event.button() == Qt.MouseButton.LeftButton:
             # Hit Testing with "Closest to Mouse" logic
             pos = event.position()
@@ -311,6 +313,7 @@ class EnergyDiagramDialog(QDialog):
             self.last_mouse_y = event.position().y()
 
     def try_load_cube(self, index, label, spin_suffix=""):
+        """Load the matching cube file for an orbital, or offer to generate one."""
         if not self.result_dir:
             # QMessageBox.information(self, "Info", "No result directory linked.")
             return
@@ -343,9 +346,6 @@ class EnergyDiagramDialog(QDialog):
         else:
             # RHF/RKS: "16" -> "16"
             patterns.append(f"*_MO_{target_idx}.cube")
-            patterns.append(
-                f"*_MO_{target_idx}_*.cube"
-            )  # For extended labels if any? No, safe_id is strict.
             patterns.append(f"{target_idx:03d}_*.cube")  # Legacy
             patterns.append(f"{index:03d}_*.cube")  # Legacy 0-based
 
@@ -353,6 +353,8 @@ class EnergyDiagramDialog(QDialog):
         search_dirs = [self.result_dir]
 
         # 1. Try to find the exact _cubes subfolder from parser filename
+        own_cube_dir_name = None
+        base = None
         parent_dlg = self.parent()
         if parent_dlg and hasattr(parent_dlg, "parent_dlg") and parent_dlg.parent_dlg:
             main_dlg = parent_dlg.parent_dlg
@@ -362,24 +364,45 @@ class EnergyDiagramDialog(QDialog):
                     base = os.path.splitext(os.path.basename(main_dlg.parser.filename))[
                         0
                     ]
-                    cube_dir = os.path.join(res_dir, f"{base}_cubes")
+                    own_cube_dir_name = f"{base}_cubes"
+                    cube_dir = os.path.join(res_dir, own_cube_dir_name)
                     if os.path.exists(cube_dir) and cube_dir not in search_dirs:
                         search_dirs.append(cube_dir)
 
-        # 2. Also search for any subdirectories ending with '_cubes' in self.result_dir
+        # 2. Also search '_cubes' subdirectories of self.result_dir. When the
+        # loaded file is known, only its own: another job's "*_cubes" folder
+        # in the same directory holds a same-numbered orbital of a different
+        # molecule, which then loaded silently as if it were this one.
         if os.path.isdir(self.result_dir):
             try:
                 for item in os.listdir(self.result_dir):
                     item_path = os.path.join(self.result_dir, item)
-                    if os.path.isdir(item_path) and item.endswith("_cubes"):
+                    wanted = (
+                        item == own_cube_dir_name
+                        if own_cube_dir_name
+                        else item.endswith("_cubes")
+                    )
+                    if os.path.isdir(item_path) and wanted:
                         if item_path not in search_dirs:
                             search_dirs.append(item_path)
-            except Exception as e:
+            except OSError as e:
                 logging.warning("Error listing result_dir in try_load_cube: %s", e)
 
         files = []
         for s_dir in search_dirs:
-            for p in patterns:
+            search_patterns = patterns
+            if base:
+                exact_patterns = [
+                    p.replace("*_MO_", f"{glob.escape(base)}_MO_")
+                    for p in patterns if p.startswith("*_MO_")
+                ]
+                # Legacy names have provenance only inside this job's cube folder.
+                search_patterns = exact_patterns
+                if os.path.basename(s_dir) == own_cube_dir_name:
+                    search_patterns = exact_patterns + [
+                        p for p in patterns if not p.startswith("*_MO_")
+                    ]
+            for p in search_patterns:
                 full_p = os.path.join(s_dir, p)
                 files = glob.glob(full_p)
                 if files:
@@ -421,6 +444,7 @@ class EnergyDiagramDialog(QDialog):
                     self.parent().generate_specific_orbital(index, label, spin_suffix)
 
     def mouseMoveEvent(self, event):
+        """Show an orbital tooltip on hover, or continue a drag-to-zoom."""
         # Check if hovering over a clickable orbital level (when not dragging)
         if not (getattr(self, "dragging", None) is not None and self.dragging):
             pos = event.position()
@@ -434,11 +458,11 @@ class EnergyDiagramDialog(QDialog):
                         hovering_over_orbital = True
                         hit_found = True
 
-                        # Show Tooltip with Index (User Request)
-                        # Use 1-based index
+                        # 0-based, matching ORCA's MO numbering.
                         tip_text = f"Index: {index}"
                         if label:
-                            tip_text += f"\\n{label}"
+                            # A real newline: "\\n" showed a literal backslash-n.
+                            tip_text += f"\n{label}"
                         if spin_suffix:
                             tip_text += f" ({spin_suffix.replace('_', '')})"
 
@@ -485,10 +509,12 @@ class EnergyDiagramDialog(QDialog):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        """End a drag-to-zoom gesture."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = False
 
     def contextMenuEvent(self, event):
+        """Show a right-click menu offering to save the diagram as PNG."""
         menu = QMenu(self)
         save_act = QAction("Save as PNG...", self)
         save_act.triggered.connect(self.save_image)
@@ -496,6 +522,7 @@ class EnergyDiagramDialog(QDialog):
         menu.exec(event.globalPos())
 
     def save_image(self):
+        """Prompt for a path and save the diagram (minus controls) as a PNG."""
         fname, _ = QFileDialog.getSaveFileName(
             self, "Save Diagram", "orbital_diagram.png", "Images (*.png)"
         )
@@ -529,10 +556,14 @@ class EnergyDiagramDialog(QDialog):
             for w in widgets_to_restore:
                 w.setVisible(True)
 
-    def update_unit(self, text):
+    def update_unit(self, text):  # pylint: disable=unused-argument
+        # text is unused: connected to the combo box's signal, unit is re-read from the widget.
+        """Repaint the diagram after the energy unit combo box changes."""
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # pylint: disable=unused-argument
+        # Qt override signature requires the event argument.
+        """Draw the axis, energy levels, occupation arrows and orbital labels."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -546,7 +577,7 @@ class EnergyDiagramDialog(QDialog):
         factor = 1.0
         unit_label_str = "Ha"
         if unit == "eV":
-            factor = nist.HARTREE2EV if nist else 27.211386245988
+            factor = HARTREE_TO_EV
             unit_label_str = "eV"
 
         # Draw Background
@@ -601,7 +632,8 @@ class EnergyDiagramDialog(QDialog):
                 step = 2 * magnitude
             else:
                 step = magnitude
-        except Exception:
+        except (TypeError, ValueError, ZeroDivisionError):
+            # ZeroDivision: a subnormal raw_step underflows 10**floor(log10(x)) to 0.0.
             step = 1.0
 
         if step <= 0:
@@ -650,7 +682,9 @@ class EnergyDiagramDialog(QDialog):
         level_w = 50  # Fixed compact width (pixels)
         padding_left = 10  # Space from column start
 
-        def find_somo_indices(energies_a, occ_a, energies_b, occ_b):
+        def find_somo_indices(energies_a, occ_a, energies_b, occ_b):  # pylint: disable=unused-argument
+            # energies_a/energies_b are unused: SOMO is derived from occupation counts alone,
+            # assuming orbitals are already energy-sorted from index 0.
             """Find orbitals where Alpha is occupied but Beta is not (SOMO)"""
             somo_indices = set()
 

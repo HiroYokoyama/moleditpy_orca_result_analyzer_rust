@@ -5,13 +5,13 @@ Tests for orbital energy diagram overlap shifting logic.
 import sys
 from unittest.mock import MagicMock
 
-# Stub PyQt6 to prevent DLL loading in test environment
-if "PyQt6" not in sys.modules:
-    pyqt6 = MagicMock()
-    sys.modules["PyQt6"] = pyqt6
-    sys.modules["PyQt6.QtWidgets"] = pyqt6.QtWidgets
-    sys.modules["PyQt6.QtCore"] = pyqt6.QtCore
-    sys.modules["PyQt6.QtGui"] = pyqt6.QtGui
+# Stub PySide6 to prevent DLL loading in test environment
+if "PySide6" not in sys.modules:
+    pyside6 = MagicMock()
+    sys.modules["PySide6"] = pyside6
+    sys.modules["PySide6.QtWidgets"] = pyside6.QtWidgets
+    sys.modules["PySide6.QtCore"] = pyside6.QtCore
+    sys.modules["PySide6.QtGui"] = pyside6.QtGui
 
 from orca_result_analyzer_rust.energy_diag import calculate_arrow_shifts
 

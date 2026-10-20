@@ -200,3 +200,324 @@ class TestGenerationQueue(_MOCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Regenerate (overwrite) — context menu on the orbital table
+# ---------------------------------------------------------------------------
+
+
+class _RegenCase(_MOCase):
+    """Drives _generate_single_mo far enough to reach the cache check."""
+
+    def setUp(self):
+        super().setUp()
+        self.host.parser.data = {
+            "mo_coeffs": {"1": {"coeffs": [{"coeff": 0.1}, {"coeff": 0.2}]}},
+            "atoms": ["H", "H"],
+            "coords": [(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)],
+        }
+        engine = MagicMock()
+        engine.n_basis = 2
+        patcher = patch.object(self.dlg, "get_engine", return_value=engine)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.shown = []
+        patcher2 = patch.object(self.dlg, "show_cube", self.shown.append)
+        patcher2.start()
+        self.addCleanup(patcher2.stop)
+
+        self.worker_cls = patch.object(M, "CalcWorker")
+        self.worker = self.worker_cls.start()
+        self.addCleanup(self.worker_cls.stop)
+        retained = patch.object(M, "_RUNNING_WORKERS", set())
+        retained.start()
+        self.addCleanup(retained.stop)
+
+    def _write_cached_cube(self):
+        path = self.dlg.get_cube_path("1")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("stale cube\n")
+        return path
+
+
+class TestGenerationShutdown(_RegenCase):
+    def test_closed_dialog_cannot_restart_the_generation_queue(self):
+        self.dlg.closeEvent(MagicMock())
+        with patch.object(self.dlg, "_generate_single_mo") as generate:
+            self.dlg.process_generation_queue()
+        generate.assert_not_called()
+        self.assertIsNone(self.dlg.progress_dialog)
+        self.assertEqual(self.dlg.generation_queue, [])
+
+    def test_close_cancels_the_worker_and_discards_the_batch(self):
+        self.dlg.progress_dialog = None
+        self.dlg._generate_single_mo("1")
+        worker = self.worker.return_value
+        self.dlg.generation_queue = ["2"]
+        done = MagicMock()
+        self.dlg.generation_done_cb = done
+        progress = self.dlg.progress_dialog
+        with patch.object(progress, "close") as close_progress:
+            self.dlg.closeEvent(MagicMock())
+        worker.cancel.assert_called_once()
+        self.assertEqual(self.dlg.generation_queue, [])
+        self.assertIsNone(self.dlg.generation_done_cb)
+        close_progress.assert_called_once()
+        self.assertIn(worker, M._RUNNING_WORKERS)
+
+    def test_late_results_cannot_redraw_or_advance_the_closed_dialog(self):
+        self.dlg._generate_single_mo("1")
+        worker = self.worker.return_value
+        result = worker.finished_sig.connect.call_args.args[0]
+        self.dlg.closeEvent(MagicMock())
+        with patch.object(self.dlg, "process_generation_queue") as advance:
+            result(True, "old.cube")
+        self.assertEqual(self.shown, [])
+        advance.assert_not_called()
+        self.assertIn(worker, M._RUNNING_WORKERS)
+        worker.finished.connect.call_args.args[0]()
+        self.assertNotIn(worker, M._RUNNING_WORKERS)
+
+
+class TestRegenerateOverwrites(_RegenCase):
+    def test_an_existing_cube_is_reused_without_recomputing(self):
+        path = self._write_cached_cube()
+        self.dlg._generate_single_mo("1")
+        self.assertEqual(self.shown, [path])
+        self.worker.assert_not_called()
+
+    def test_forcing_recomputes_even_though_the_cube_exists(self):
+        self._write_cached_cube()
+        self.dlg.generation_force = True
+        self.dlg._generate_single_mo("1")
+        # The cached file must NOT be displayed; a worker must run instead.
+        self.assertEqual(self.shown, [])
+        self.worker.assert_called_once()
+
+    def test_the_worker_writes_over_the_existing_path(self):
+        path = self._write_cached_cube()
+        self.dlg.generation_force = True
+        self.dlg._generate_single_mo("1")
+        self.assertEqual(self.worker.call_args[0][-1], path)
+
+    def test_regenerate_selected_sets_the_force_flag(self):
+        self._select(1)
+        with patch.object(self.dlg, "_generate_single_mo"):
+            self.dlg.regenerate_selected_mos()
+        self.assertTrue(self.dlg.generation_force)
+
+    def test_plain_visualise_leaves_the_force_flag_off(self):
+        self._select(1)
+        with patch.object(self.dlg, "_generate_single_mo"):
+            self.dlg.visualize_selected_mos()
+        self.assertFalse(self.dlg.generation_force)
+
+    def test_force_is_cleared_once_the_batch_drains(self):
+        """Otherwise the next plain Visualize would silently recompute too."""
+        self.dlg.generation_force = True
+        self.dlg.generation_queue = []
+        self.dlg.progress_dialog = None
+        self.dlg.process_generation_queue()
+        self.assertFalse(self.dlg.generation_force)
+
+    def test_a_stale_force_flag_does_not_survive_into_a_new_batch(self):
+        self.dlg.generation_force = True
+        self._select(1)
+        with patch.object(self.dlg, "_generate_single_mo"):
+            self.dlg.visualize_selected_mos()
+        self.assertFalse(self.dlg.generation_force)
+
+
+class TestTreeContextMenu(_RegenCase):
+    def _menu(self):
+        """Capture the QMenu built for a right-click."""
+        created = []
+
+        class _Menu:
+            def __init__(self, *a, **k):
+                self.actions = []
+                created.append(self)
+
+            def addAction(self, text):
+                act = MagicMock()
+                act.text = text
+                act.enabled = True
+                act.setEnabled = lambda v, a=act: setattr(a, "enabled", v)
+                self.actions.append(act)
+                return act
+
+            def addSeparator(self):
+                return None
+
+            def exec(self, *a, **k):
+                return self.chosen
+
+        return created, _Menu
+
+    def test_no_menu_without_a_selection(self):
+        self.dlg.tree.selectedItems = lambda: []
+        created, menu_cls = self._menu()
+        with patch.object(M, "QMenu", menu_cls):
+            self.dlg.show_tree_context_menu(MagicMock())
+        self.assertEqual(created, [])
+
+    def test_menu_offers_visualise_regenerate_and_compare(self):
+        self._select(1)
+        created, menu_cls = self._menu()
+        menu_cls.chosen = None
+        with patch.object(M, "QMenu", menu_cls):
+            self.dlg.show_tree_context_menu(MagicMock())
+        labels = [a.text for a in created[0].actions]
+        # The cached-cube description sits at the top, above the actions.
+        self.assertEqual(len(labels), 4)
+        self.assertIn("Visualize", labels[1])
+        self.assertIn("Regenerate", labels[2])
+        self.assertIn("Compare", labels[3])
+
+    def test_regenerate_is_disabled_when_nothing_is_cached(self):
+        self._select(1)
+        created, menu_cls = self._menu()
+        menu_cls.chosen = None
+        with patch.object(M, "QMenu", menu_cls):
+            self.dlg.show_tree_context_menu(MagicMock())
+        self.assertFalse(created[0].actions[2].enabled)
+
+    def test_regenerate_is_enabled_once_a_cube_exists(self):
+        self._write_cached_cube()
+        self._select(1)
+        created, menu_cls = self._menu()
+        menu_cls.chosen = None
+        with patch.object(M, "QMenu", menu_cls):
+            self.dlg.show_tree_context_menu(MagicMock())
+        self.assertTrue(created[0].actions[2].enabled)
+
+    def test_choosing_regenerate_forces_a_rebuild(self):
+        self._write_cached_cube()
+        self._select(1)
+        created, menu_cls = self._menu()
+
+        class _MenuChoosingRegen(menu_cls):
+            def exec(self, *a, **k):
+                return self.actions[2]
+
+        with patch.object(M, "QMenu", _MenuChoosingRegen):
+            with patch.object(self.dlg, "_generate_single_mo"):
+                self.dlg.show_tree_context_menu(MagicMock())
+        self.assertTrue(self.dlg.generation_force)
+
+    def test_choosing_visualise_does_not_force(self):
+        self._write_cached_cube()
+        self._select(1)
+        created, menu_cls = self._menu()
+
+        class _MenuChoosingVis(menu_cls):
+            def exec(self, *a, **k):
+                return self.actions[1]
+
+        with patch.object(M, "QMenu", _MenuChoosingVis):
+            with patch.object(self.dlg, "_generate_single_mo"):
+                self.dlg.show_tree_context_menu(MagicMock())
+        self.assertFalse(self.dlg.generation_force)
+
+    def test_dismissing_the_menu_starts_no_work(self):
+        self._select(1)
+        created, menu_cls = self._menu()
+        menu_cls.chosen = None
+        with patch.object(M, "QMenu", menu_cls):
+            with patch.object(self.dlg, "_generate_single_mo") as gen:
+                self.dlg.show_tree_context_menu(MagicMock())
+        gen.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# One batch at a time, and Cancel
+# ---------------------------------------------------------------------------
+
+
+class _Running:
+    """A worker stand-in that reports it is still computing."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    def isRunning(self):
+        return True
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class TestGenerationBusyGuard(_RegenCase):
+    def test_visualise_is_refused_while_a_worker_runs(self):
+        self.dlg.worker = _Running()
+        self._select(1)
+        with patch.object(M, "notify") as note, patch.object(
+            self.dlg, "_generate_single_mo"
+        ) as gen:
+            self.dlg.visualize_selected_mos()
+        gen.assert_not_called()
+        self.assertIn("already in progress", note.call_args[0][1])
+
+    def test_generate_cubes_is_refused_but_still_calls_back(self):
+        self.dlg.worker = _Running()
+        self.dlg.generation_queue = ["kept"]
+        seen = []
+        with patch.object(M, "notify"):
+            self.dlg.generate_cubes(["1"], on_done=lambda: seen.append(True))
+        self.assertEqual(seen, [True])
+        self.assertEqual(self.dlg.generation_queue, ["kept"])
+
+    def test_a_stub_worker_does_not_count_as_running(self):
+        self.dlg.worker = MagicMock()
+        self.assertFalse(self.dlg._generation_busy())
+
+    def test_a_deleted_worker_does_not_count_as_running(self):
+        class _Gone:
+            def isRunning(self):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        self.dlg.worker = _Gone()
+        self.assertFalse(self.dlg._generation_busy())
+
+
+class TestCancelGeneration(_RegenCase):
+    def test_cancel_drops_the_queue_and_stops_the_worker(self):
+        worker = _Running()
+        self.dlg.worker = worker
+        self.dlg.generation_queue = ["2", "3"]
+        self.dlg.cancel_generation()
+        self.assertEqual(self.dlg.generation_queue, [])
+        self.assertTrue(worker.cancelled)
+
+    def test_the_progress_cancel_button_is_wired(self):
+        self.dlg.progress_dialog = None
+        self.dlg.generation_force = True
+        with patch.object(M, "QProgressDialog") as progress:
+            self.dlg._generate_single_mo("1")
+        progress.return_value.canceled.connect.assert_called_once_with(
+            self.dlg.cancel_generation
+        )
+
+    def _finish(self, success, message):
+        self.dlg.progress_dialog = None
+        self.dlg.generation_force = True
+        with patch.object(M, "QProgressDialog"):
+            self.dlg._generate_single_mo("1")
+        on_finished = self.worker.return_value.finished_sig.connect.call_args[0][0]
+        with patch.object(M.QMessageBox, "warning") as warn, patch.object(
+            self.dlg, "process_generation_queue"
+        ) as nxt:
+            on_finished(success, message)
+        return warn, nxt
+
+    def test_a_cancelled_worker_is_not_reported_as_a_failure(self):
+        warn, nxt = self._finish(False, M.CANCELLED)
+        warn.assert_not_called()
+        nxt.assert_called_once_with()
+
+    def test_a_real_failure_is_still_reported(self):
+        warn, _ = self._finish(False, "disk full")
+        self.assertIn("disk full", warn.call_args[0][2])

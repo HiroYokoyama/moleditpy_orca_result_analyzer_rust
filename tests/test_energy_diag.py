@@ -680,3 +680,64 @@ class TestDialogMisc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCubeLookupStaysWithTheLoadedFile(TestTryLoadCube):
+    def _host_for(self, out_name):
+        host = self._host()
+        parser = types.SimpleNamespace(filename=os.path.join(self.dir, out_name))
+        host.parent_dlg = types.SimpleNamespace(parser=parser)
+        return host
+
+    def test_another_jobs_cube_folder_is_not_searched(self):
+        self._touch("other_MO_5.cube", subdir="other_cubes")
+        host = self._host_for("job.out")
+        with patch.object(E.QMessageBox, "question", return_value="no"):
+            self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_not_called()
+
+    def test_the_loaded_files_own_cube_folder_is_searched(self):
+        path = self._touch("job_MO_5.cube", subdir="job_cubes")
+        host = self._host_for("job.out")
+        self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_called_once_with(path)
+
+
+class TestDoubleClickReset(unittest.TestCase):
+    def test_a_degenerate_gap_keeps_a_visible_window(self):
+        dlg = _make_dialog(_rhf_data())
+        dlg.homo_energy = dlg.lumo_energy = -0.3
+        dlg.update = MagicMock()
+        dlg.mouseDoubleClickEvent(None)
+        self.assertGreaterEqual(dlg.current_max - dlg.current_min, 0.2)
+
+
+class TestSharedDirectoryCubeProvenance(TestCubeLookupStaysWithTheLoadedFile):
+    def test_foreign_cube_in_result_directory_is_not_loaded(self):
+        self._touch("other_MO_5.cube")
+        self._touch("005_HOMO.cube")
+        host = self._host_for("current.out")
+        with patch.object(E.QMessageBox, "question", return_value=E.QMessageBox.StandardButton.Yes):
+            self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_not_called()
+        host.generate_specific_orbital.assert_called_once_with(5, "HOMO", "")
+
+    def test_exact_current_cube_wins_over_foreign_file(self):
+        self._touch("other_MO_5.cube")
+        path = self._touch("current_MO_5.cube")
+        host = self._host_for("current.out")
+        self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_called_once_with(path)
+
+    def test_restricted_request_does_not_load_spin_cube(self):
+        self._touch("current_MO_5_b.cube")
+        host = self._host_for("current.out")
+        with patch.object(E.QMessageBox, "question", return_value="no"):
+            self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_not_called()
+
+    def test_legacy_cube_inside_current_folder_is_supported(self):
+        path = self._touch("005_HOMO.cube", subdir="current_cubes")
+        host = self._host_for("current.out")
+        self._dialog(host).try_load_cube(5, "HOMO")
+        host.load_file_by_path.assert_called_once_with(path)

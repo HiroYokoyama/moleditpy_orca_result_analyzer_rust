@@ -3,10 +3,14 @@ tests/test_utils.py
 Unit tests for orca_result_analyzer_rust/utils.py (pure Python, no stubs required).
 """
 
+import json
 import os
+import shutil
+import stat
 import sys
 import importlib.util
 import unittest
+from unittest.mock import patch
 
 _SRC = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "orca_result_analyzer_rust", "utils.py")
@@ -27,6 +31,9 @@ normalize_atom_symbol = _utils.normalize_atom_symbol
 determine_bonds_without_dummies = _utils.determine_bonds_without_dummies
 list_orca_output_files = _utils.list_orca_output_files
 clear_atom_color_overrides = _utils.clear_atom_color_overrides
+sync_main_window_file = _utils.sync_main_window_file
+save_json_atomic = _utils.save_json_atomic
+notify = _utils.notify
 
 # ---------------------------------------------------------------------------
 # RDKit availability — used by skipUnless decorators throughout this module
@@ -196,7 +203,7 @@ class TestDetermineBondsWithoutDummies(unittest.TestCase):
         self.assertEqual(mol.GetNumBonds(), 2)
 
 
-import tempfile
+import tempfile  # noqa: E402
 
 
 class TestListOrcaOutputFiles(unittest.TestCase):
@@ -248,6 +255,81 @@ class _FakeMW:
         self.view_3d_manager = v3d
 
 
+class _FakeInit:
+    def __init__(self):
+        self.current_file_path = None
+
+
+class _FakeState:
+    def __init__(self):
+        self.title_updates = 0
+
+    def update_window_title(self):
+        self.title_updates += 1
+
+
+class _FakeHost:
+    def __init__(self):
+        self.init_manager = _FakeInit()
+        self.state_manager = _FakeState()
+
+
+class _FakeContext:
+    def __init__(self):
+        self.refreshes = 0
+
+    def refresh_ui(self):
+        self.refreshes += 1
+
+
+class TestSyncMainWindowFile(unittest.TestCase):
+    """The main window must name the loaded ORCA file, as it does its own."""
+
+    def setUp(self):
+        self.mw = _FakeHost()
+
+    def test_the_path_becomes_the_current_file(self):
+        sync_main_window_file(self.mw, "/tmp/job.out")
+        self.assertEqual(self.mw.init_manager.current_file_path, "/tmp/job.out")
+
+    def test_the_title_is_rebuilt(self):
+        sync_main_window_file(self.mw, "/tmp/job.out")
+        self.assertEqual(self.mw.state_manager.title_updates, 1)
+
+    def test_only_the_title_is_touched_when_the_host_can_do_it(self):
+        ctx = _FakeContext()
+        sync_main_window_file(self.mw, "/tmp/job.out", ctx)
+        self.assertEqual((self.mw.state_manager.title_updates, ctx.refreshes), (1, 0))
+
+    def test_a_host_without_a_title_call_falls_back_to_the_context(self):
+        class _Bare:
+            pass
+
+        mw = _FakeHost()
+        mw.state_manager = _Bare()
+        ctx = _FakeContext()
+        sync_main_window_file(mw, "/tmp/job.out", ctx)
+        self.assertEqual(ctx.refreshes, 1)
+
+    def test_a_failing_refresh_does_not_break_the_load(self):
+        class _Broken:
+            def update_window_title(self):
+                raise RuntimeError("wrapped C/C++ object deleted")
+
+        self.mw.state_manager = _Broken()
+        sync_main_window_file(self.mw, "/tmp/job.out")
+        self.assertEqual(self.mw.init_manager.current_file_path, "/tmp/job.out")
+
+    def test_no_main_window_is_a_noop(self):
+        sync_main_window_file(None, "/tmp/job.out")
+
+    def test_a_host_without_managers_is_a_noop(self):
+        class _Bare:
+            pass
+
+        sync_main_window_file(_Bare(), "/tmp/job.out")
+
+
 class TestClearAtomColorOverrides(unittest.TestCase):
     """Tests for clear_atom_color_overrides() — used on every 'new file loaded'
     entry point so charge-coloring from a previous result never bleeds onto a
@@ -291,6 +373,194 @@ class TestClearAtomColorOverrides(unittest.TestCase):
             self.fail(
                 f"Should be non-fatal without _plugin_color_overrides, raised: {exc}"
             )
+
+
+class TestSaveJsonAtomic(unittest.TestCase):
+    """Windows hands back WinError 5 from os.replace for two very different
+    reasons: a transient handle held by a scanner/indexer, and a genuinely
+    read-only destination. The first recovers on its own, the second never
+    does — a save that gives up on the first PermissionError loses the
+    user's settings either way (observed against a plugin dir unpacked from
+    a zip that carried the read-only attribute)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = os.path.join(self.tmp, "settings.json")
+
+    def test_writes_and_reads_back(self):
+        save_json_atomic(self.path, {"a": 1})
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"a": 1})
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+    def test_transient_permission_error_is_retried(self):
+        save_json_atomic(self.path, {"gen": 1})
+        real_replace = os.replace
+        calls = []
+
+        def flaky(src, dst):
+            calls.append(src)
+            if len(calls) < 3:
+                raise PermissionError(5, "Access is denied")
+            return real_replace(src, dst)
+
+        with (
+            patch.object(_utils.os, "replace", flaky),
+            patch.object(_utils.time, "sleep", lambda _s: None),
+        ):
+            save_json_atomic(self.path, {"gen": 2})
+
+        self.assertEqual(len(calls), 3)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"gen": 2})
+
+    def test_read_only_destination_is_cleared_and_written(self):
+        save_json_atomic(self.path, {"gen": 1})
+        os.chmod(self.path, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.path, stat.S_IWRITE | stat.S_IREAD)
+
+        attempts = []
+        real_replace = os.replace
+
+        def readonly_aware(src, dst):
+            attempts.append(dst)
+            # Emulate Windows: replacing onto a read-only file is denied.
+            if not os.access(dst, os.W_OK):
+                raise PermissionError(5, "Access is denied")
+            return real_replace(src, dst)
+
+        with (
+            patch.object(_utils.os, "replace", readonly_aware),
+            patch.object(_utils.time, "sleep", lambda _s: None),
+        ):
+            save_json_atomic(self.path, {"gen": 2})
+
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"gen": 2})
+
+    def test_permanent_failure_raises_and_leaves_original_intact(self):
+        save_json_atomic(self.path, {"keep": True})
+
+        def always_denied(src, dst):
+            raise PermissionError(5, "Access is denied")
+
+        with (
+            patch.object(_utils.os, "replace", always_denied),
+            patch.object(_utils.time, "sleep", lambda _s: None),
+        ):
+            with self.assertRaises(PermissionError):
+                save_json_atomic(self.path, {"keep": False})
+
+        # The point of the temp-file dance: the previous settings survive.
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"keep": True})
+
+    def test_failed_save_does_not_leave_a_temp_file(self):
+        def always_denied(src, dst):
+            raise PermissionError(5, "Access is denied")
+
+        with (
+            patch.object(_utils.os, "replace", always_denied),
+            patch.object(_utils.time, "sleep", lambda _s: None),
+        ):
+            with self.assertRaises(PermissionError):
+                save_json_atomic(self.path, {"a": 1})
+
+        self.assertFalse(
+            os.path.exists(self.path + ".tmp"),
+            "a failing save must not accumulate .tmp files beside the real one",
+        )
+
+    def test_unserializable_payload_cleans_up_and_raises(self):
+        with self.assertRaises(TypeError):
+            save_json_atomic(self.path, {"bad": object()})
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+
+class _Ctx:
+    def __init__(self, boom=None):
+        self.msgs = []
+        self.boom = boom
+
+    def show_status_message(self, message, timeout):
+        if self.boom:
+            raise self.boom
+        self.msgs.append((message, timeout))
+
+
+class _Node:
+    """Stand-in for a dialog; attributes are attached per test."""
+
+
+class TestNotify(unittest.TestCase):
+    """notify() replaces four hand-written spellings of the same host lookup."""
+
+    def test_uses_a_context_on_the_object_itself(self):
+        ctx = _Ctx()
+        owner = _Node()
+        owner.context = ctx
+        self.assertTrue(notify(owner, "hello", 1234))
+        self.assertEqual(ctx.msgs, [("hello", 1234)])
+
+    def test_default_timeout_is_three_seconds(self):
+        ctx = _Ctx()
+        owner = _Node()
+        owner.context = ctx
+        notify(owner, "hi")
+        self.assertEqual(ctx.msgs, [("hi", 3000)])
+
+    def test_walks_parent_dlg_freq_dialog_and_parent_callable(self):
+        for hop, build in (
+            ("parent_dlg", lambda child, top: setattr(child, "parent_dlg", top)),
+            ("freq_dialog", lambda child, top: setattr(child, "freq_dialog", top)),
+            ("parent()", lambda child, top: setattr(child, "parent", lambda: top)),
+        ):
+            with self.subTest(hop=hop):
+                ctx = _Ctx()
+                top = _Node()
+                top.context = ctx
+                child = _Node()
+                build(child, top)
+                self.assertTrue(notify(child, "via " + hop))
+                self.assertEqual(ctx.msgs, [("via " + hop, 3000)])
+
+    def test_logs_instead_of_raising_when_there_is_no_host(self):
+        with self.assertLogs(level="INFO") as cm:
+            self.assertFalse(notify(None, "no host"))
+        self.assertTrue(any("no host" in line for line in cm.output))
+
+    def test_a_context_without_the_method_is_not_used(self):
+        owner = _Node()
+        owner.context = object()
+        with self.assertLogs(level="INFO"):
+            self.assertFalse(notify(owner, "unusable context"))
+
+    def test_a_host_that_raises_is_logged_not_propagated(self):
+        owner = _Node()
+        owner.context = _Ctx(boom=RuntimeError("wrapped C/C++ object deleted"))
+        with self.assertLogs(level="WARNING") as cm:
+            self.assertFalse(notify(owner, "dead window"))
+        self.assertTrue(any("rejected by host" in line for line in cm.output))
+
+    def test_a_parent_cycle_terminates(self):
+        loop = _Node()
+        loop.parent_dlg = loop
+        with self.assertLogs(level="INFO"):
+            self.assertFalse(notify(loop, "cycle"))
+
+    def test_a_chain_longer_than_the_hop_limit_gives_up_quietly(self):
+        ctx = _Ctx()
+        top = _Node()
+        top.context = ctx
+        node = top
+        for _ in range(8):
+            child = _Node()
+            child.parent_dlg = node
+            node = child
+        with self.assertLogs(level="INFO"):
+            self.assertFalse(notify(node, "too deep"))
+        self.assertEqual(ctx.msgs, [])
 
 
 if __name__ == "__main__":

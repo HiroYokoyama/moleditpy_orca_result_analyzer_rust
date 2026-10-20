@@ -72,6 +72,26 @@ class _LoadCase(unittest.TestCase):
 
 
 class TestLoadFile(_LoadCase):
+    def test_a_rejected_child_close_keeps_the_current_result(self):
+        child = MagicMock()
+        child.close.return_value = False
+        self.dlg.nmr_dlg = child
+        before = self.dlg.file_path
+        with patch.object(G, "load_orca_parser") as load:
+            self.dlg.load_file(self._write("second.out", OUT_TEXT))
+        load.assert_not_called()
+        self.assertEqual(self.dlg.file_path, before)
+        self.assertIs(self.dlg.nmr_dlg, child)
+
+    def test_a_rejected_child_close_keeps_the_analyzer_open(self):
+        child = MagicMock()
+        child.close.return_value = False
+        self.dlg.nmr_dlg = child
+        event = MagicMock()
+        self.dlg.closeEvent(event)
+        event.ignore.assert_called_once()
+        event.accept.assert_not_called()
+
     def test_the_file_becomes_the_current_result(self):
         path = self._write("second.out", OUT_TEXT)
         self.dlg.load_file(path)
@@ -108,6 +128,27 @@ class TestLoadFile(_LoadCase):
         self.dlg.load_file(path)
         self.assertEqual(self.mw.init_manager.current_file_path, path)
 
+    def test_the_main_window_title_is_actually_redrawn(self):
+        path = self._write("second.out", OUT_TEXT)
+        self.dlg.load_file(path)
+        self.mw.state_manager.update_window_title.assert_called()
+
+    def test_cancelling_the_load_keeps_the_previous_result(self):
+        before = self.dlg.file_path
+        with patch.object(G, "load_orca_parser", return_value=None):
+            self.dlg.load_file(self._write("second.out", OUT_TEXT))
+        self.assertEqual(self.dlg.file_path, before)
+
+    def test_cancelling_the_load_is_reported(self):
+        with patch.object(G, "load_orca_parser", return_value=None):
+            self.dlg.load_file(self._write("second.out", OUT_TEXT))
+        self.assertTrue(
+            any(
+                "cancelled" in str(c.args[0]).lower()
+                for c in self.context.show_status_message.call_args_list
+            )
+        )
+
     def test_success_is_reported(self):
         self.dlg.load_file(self._write("second.out", OUT_TEXT))
         self.assertTrue(
@@ -142,6 +183,18 @@ class TestLoadFile(_LoadCase):
 
 
 class TestNebTrajectoryAutoload(_LoadCase):
+    def _write(self, name, text, encoding="utf-8"):
+        if name == "neb.out":
+            text += "\nNUDGED ELASTIC BAND\n"
+        return super()._write(name, text, encoding)
+
+    def test_non_neb_output_ignores_a_stale_sibling_trajectory(self):
+        path = self._write("plain.out", OUT_TEXT)
+        self._write("plain_MEP_trj.xyz", _xyz([(-100.0, 9.0)]))
+        self.dlg.load_file(path)
+        self.assertEqual(self.dlg.parser.data["scan_steps"], [])
+        self.assertAlmostEqual(self.dlg.parser.data["coords"][1][0], 0.96)
+
     def test_a_sibling_mep_trajectory_is_picked_up(self):
         path = self._write("neb.out", OUT_TEXT)
         self._write("neb_MEP_trj.xyz", _xyz([(-100.0, 0.96), (-100.5, 0.97)]))

@@ -5,7 +5,7 @@ Behavioural regression for the "close button does nothing" bug.
 
 The rest of the suite runs against Qt stubs whose close()/reject()/closeEvent
 are no-ops, so they cannot exercise the real QDialog reentrancy that caused the
-bug. This test drives a real PyQt6 QDialog in an isolated subprocess (offscreen)
+bug. This test drives a real PySide6 QDialog in an isolated subprocess (offscreen)
 so it cannot disturb the shared in-process stubs, and skips when no Qt binding
 is installed (as in CI).
 
@@ -30,9 +30,9 @@ _CHILD = textwrap.dedent(
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
-        from PyQt6.QtWidgets import QApplication, QDialog, QWidget
+        from PySide6.QtWidgets import QApplication, QDialog, QWidget
     except Exception:
-        print("SKIP: no PyQt6 binding")
+        print("SKIP: no PySide6 binding")
         raise SystemExit(0)
 
     app = QApplication.instance() or QApplication([])
@@ -93,7 +93,7 @@ class TestRejectCloseBehaviour(unittest.TestCase):
         )
         out = proc.stdout
         if "SKIP:" in out:
-            self.skipTest("PyQt6 binding not available")
+            self.skipTest("PySide6 binding not available")
         self.assertIn("RESULTS", out, f"child failed:\n{proc.stdout}\n{proc.stderr}")
         line = next(ln for ln in out.splitlines() if ln.startswith("RESULTS"))
         results = eval(line[len("RESULTS ") :])  # trusted child output
