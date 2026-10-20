@@ -134,9 +134,7 @@ class TestDiagramDragZoom(TestDiagramHover):
 
     def test_zooming_preserves_the_centre(self):
         self.dlg.mouseMoveEvent(_move_event(0, 350))
-        self.assertAlmostEqual(
-            (self.dlg.current_min + self.dlg.current_max) / 2, 0.0
-        )
+        self.assertAlmostEqual((self.dlg.current_min + self.dlg.current_max) / 2, 0.0)
 
     def test_the_drag_origin_follows_the_cursor(self):
         self.dlg.mouseMoveEvent(_move_event(0, 350))
@@ -370,9 +368,7 @@ class TestRemainingLaunchers(unittest.TestCase):
 
     def test_the_energy_components_window_refuses_without_data(self):
         self.parser.data = {}
-        patcher, energy = self._lazy_dialog(
-            "energy_analysis", "EnergyComponentsDialog"
-        )
+        patcher, energy = self._lazy_dialog("energy_analysis", "EnergyComponentsDialog")
         with patcher:
             with patch.object(G.QMessageBox, "information") as info:
                 self.dlg.show_energy_components()

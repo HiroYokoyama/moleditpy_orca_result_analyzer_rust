@@ -10,7 +10,13 @@ and analysis modules work without modification.
 """
 
 import logging
+import re
 import os
+
+from .parser_structure import _StructureParsingMixin
+from .parser_electronic import _ElectronicParsingMixin
+from .parser_properties import _PropertyParsingMixin
+from .parser_spectra import _SpectraParsingMixin
 
 #: 1 atomic unit of electric dipole moment (e*a0) in Debye.
 #: Mirrors the Python plugin's module constant — part of the drop-in surface,
@@ -40,7 +46,7 @@ except (ImportError, SystemError):
         else:
             _rs = None
             _RUST_AVAILABLE = False
-    except Exception:
+    except (ImportError, SystemError, OSError, AttributeError, TypeError, ValueError):
         _rs = None
         _RUST_AVAILABLE = False
 
@@ -55,16 +61,47 @@ def _rust_required():
     )
 
 
-class OrcaParser:
+class ParseCancelled(Exception):
+    """Raised by the loading UI before or after the native parsing pass."""
+
+
+class OrcaParser(_StructureParsingMixin, _ElectronicParsingMixin, _PropertyParsingMixin, _SpectraParsingMixin):
     """
     Parser for ORCA quantum chemistry output files.
     Parsing is performed by the compiled Rust extension (orca_parser_rs).
     """
 
+    PARSE_STEPS = (
+        ("parse_basic", "Reading job information"),
+        ("parse_gradients", "Reading gradients"),
+        ("parse_trajectory", "Reading trajectory"),
+        ("parse_frequencies", "Reading vibrational frequencies"),
+        ("parse_thermal", "Reading thermochemistry"),
+        ("parse_mo_coeffs", "Reading MO coefficients"),
+        ("parse_orbital_energies", "Reading orbital energies"),
+        ("parse_charges", "Reading atomic charges"),
+        ("parse_mayer_bond_orders", "Reading Mayer bond orders"),
+        ("parse_nbo_orbitals", "Reading NBO orbitals"),
+        ("parse_nbo_hybrids", "Reading NBO hybrids"),
+        ("parse_nbo_perturbation", "Reading NBO perturbation analysis"),
+        ("parse_dipole", "Reading dipole moment"),
+        ("parse_spin_contamination", "Reading spin contamination"),
+        ("parse_dispersion", "Reading dispersion correction"),
+        ("parse_energy_components", "Reading energy components"),
+        ("parse_tddft", "Reading TD-DFT excitations"),
+        ("parse_nmr", "Reading NMR data"),
+        ("parse_basis_set", "Reading basis set"),
+        ("parse_scf_trace", "Reading SCF convergence"),
+        ("parse_scan_results_table", "Reading scan results"),
+    )
+
     def __init__(self):
         self.filename = ""
         self.raw_content = ""
         self.lines = []
+        self._reset_data()
+
+    def _reset_data(self):
         self.data = {
             "scf_traces": [],
             "converged": False,
@@ -89,27 +126,52 @@ class OrcaParser:
             "thermal": {},
             "scan_steps": [],
             "all_steps": [],
+            "termination_status": "Running",
         }
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def load_from_memory(self, content, filename=""):
+    def load_from_memory(self, content, filename="", progress=None):
+        self._reset_data()
         self.filename = filename
         self.raw_content = content
-        self.lines = content.splitlines()
-        self.parse_all()
+        lines = content.splitlines()
+        start = 0
+        version_line = None
+        for i, line in enumerate(lines):
+            if re.match(r"^\s*Program Version\s+\d", line):
+                start = i
+                version_line = line
+            elif re.match(r"^\s*\*?\s*JOB NUMBER\s+\d+\s*\*?\s*$", line):
+                start = i
+        self.lines = lines[start:]
+        if version_line and not any("Program Version" in line for line in self.lines):
+            self.lines.insert(0, version_line)
+        self.parse_all(progress=progress)
 
-    def parse_all(self):
-        """Delegate all parsing to the Rust extension."""
+    def parse_all(self, progress=None):
+        """Native bulk parsing plus the shared NBO/spin compatibility sections.
+
+        The native pass runs once. Cancellation is checked before it and during
+        the following Python compatibility steps, not inside the native pass.
+        """
         if not _RUST_AVAILABLE:
             _rust_required()
-        try:
-            self.data = _rs.parse_all(self.raw_content)
-        except Exception as e:
-            logging.error("[parser.py] Rust parse_all raised: %s", e)
-            raise
+        total = len(self.PARSE_STEPS)
+        if progress is not None:
+            progress(0, total, self.PARSE_STEPS[0][1])
+        content = "\n".join(self.lines) if self.lines else self.raw_content
+        self.data = _rs.parse_all(content)
+        shared = {"parse_spin_contamination", "parse_nbo_orbitals", "parse_nbo_hybrids", "parse_nbo_perturbation"}
+        for done, (method, label) in enumerate(self.PARSE_STEPS):
+            if done and progress is not None:
+                progress(done, total, label)
+            if method in shared:
+                getattr(self, method)()
+        if progress is not None:
+            progress(total, total, "Finished")
 
     def parse_xyz_content(self, content):
         """Parse multi-frame XYZ content (e.g. NEB trajectory files)."""
@@ -124,8 +186,7 @@ class OrcaParser:
     # ------------------------------------------------------------------
 
     def _reparse(self):
-        if self.raw_content:
-            self.parse_all()
+        self.parse_all()
 
     parse_basic            = _reparse
     parse_gradients        = _reparse
@@ -140,6 +201,11 @@ class OrcaParser:
     parse_dipole           = _reparse
     parse_tddft            = _reparse
     parse_nmr              = _reparse
-    parse_basis_set        = _reparse
+    parse_basis_set        = _ElectronicParsingMixin.parse_basis_set
     parse_scf_trace        = _reparse
     parse_scan_results_table = _reparse
+    parse_mayer_bond_orders = _reparse
+    parse_dispersion = _reparse
+    parse_energy_components = _reparse
+
+    parse_termination_status = _reparse

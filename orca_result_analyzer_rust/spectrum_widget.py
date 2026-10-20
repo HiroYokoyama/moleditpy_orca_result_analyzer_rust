@@ -1,6 +1,8 @@
+"""Reusable spectrum plot widget: sticks/Gaussian broadening, zoom sync, CSV/PNG export."""
+
 import csv
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
-from PyQt6.QtCore import pyqtSignal, Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtCore import Signal, Qt
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -8,7 +10,10 @@ import logging
 
 
 class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
+    """Matplotlib figure canvas with a single constrained-layout axes."""
+
+    def __init__(self, parent=None, width=5, height=4, dpi=100):  # pylint: disable=unused-argument
+        # parent is unused: layout.addWidget() reparents the canvas once it is added.
         # Use constrained_layout for robust handling of dual axes and labels
         fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
         self.axes = fig.add_subplot(111)
@@ -16,8 +21,13 @@ class MplCanvas(FigureCanvasQTAgg):
 
 
 class SpectrumWidget(QWidget):
-    clicked = pyqtSignal(object)
-    range_changed = pyqtSignal(
+    """Sticks/Gaussian spectrum plot with click-to-select, zoom sync and export."""
+
+    # pylint: disable=attribute-defined-outside-init,access-member-before-definition
+    # Qt pattern: widget/state attributes are created lazily on first use, not in __init__.
+
+    clicked = Signal(object)
+    range_changed = Signal(
         float, float, float, float, bool
     )  # xmin, xmax, ymin, ymax, is_manual
 
@@ -80,7 +90,8 @@ class SpectrumWidget(QWidget):
         self.canvas.axes.callbacks.connect("xlim_changed", self._on_axes_changed)
         self.canvas.axes.callbacks.connect("ylim_changed", self._on_axes_changed)
 
-    def _on_axes_changed(self, ax):
+    def _on_axes_changed(self, ax):  # pylint: disable=unused-argument
+        # ax is unused: matplotlib's xlim_changed/ylim_changed callback signature.
         if self._is_plotting or not self._initial_plot_done:
             return
 
@@ -98,30 +109,37 @@ class SpectrumWidget(QWidget):
         self.range_changed.emit(xmin, xmax, ymin, ymax, True)
 
     def set_selected_item(self, item):
+        """Highlight *item* on the plot and redraw."""
         self.selected_item = item
         self.plot_spectrum()
 
     def set_data(self, data_list):
+        """Replace the plotted data points and redraw."""
         self.data_list = data_list
         self.plot_spectrum()
 
     def set_x_range(self, x_min, x_max):
+        """Fix the X-axis to the given range and redraw."""
         self.x_range = (x_min, x_max)
         self.plot_spectrum()
 
     def set_auto_x_range(self):
+        """Let the X-axis range be computed from the data again, and redraw."""
         self.x_range = None
         self.plot_spectrum()
 
     def set_y_range(self, y_min, y_max):
+        """Fix the Y-axis to the given range and redraw."""
         self.y_range = (y_min, y_max)
         self.plot_spectrum()
 
     def set_auto_range(self):
+        """Let the Y-axis range be computed from the data again, and redraw."""
         self.y_range = None
         self.plot_spectrum()
 
     def set_sigma(self, val):
+        """Set the Gaussian broadening width and redraw."""
         self.sigma = val
         self.plot_spectrum()
 
@@ -131,21 +149,26 @@ class SpectrumWidget(QWidget):
         return bool(state) and state != Qt.CheckState.Unchecked.value
 
     def set_sticks(self, state):
+        """Toggle the stick markers and redraw."""
         self.show_sticks = self._checked(state)
         self.plot_spectrum()
 
     def set_gaussian(self, state):
+        """Toggle the broadened Gaussian curve and redraw."""
         self.show_gaussian = self._checked(state)
         self.plot_spectrum()
 
     def set_markers(self, state):
+        """Toggle the peak markers and redraw."""
         self.show_markers = self._checked(state)
         self.plot_spectrum()
 
     def save_png(self, path):
+        """Save the current plot as a PNG."""
         self.canvas.figure.savefig(path, dpi=300, bbox_inches="tight")
 
     def save_csv(self, path):
+        """Write the broadened curve, sampled over its visible range, to CSV."""
         # Filter valid data
         points = []
         for item in self.data_list:
@@ -227,16 +250,19 @@ class SpectrumWidget(QWidget):
                 for i in range(len(display_x)):
                     writer.writerow([display_x[i], curve_y[i]])
             return True
-        except Exception as e:
+        except (OSError, IndexError, ValueError) as e:
             logging.warning("Error saving CSV: %s", e)
             return False
 
     def save_sticks_csv(self, path):
+        """Write the raw (unbroadened) stick data points to CSV."""
         # Filter valid data
+        stick_key = self.y_key_sticks or self.y_key
+        stick_unit = self.y_unit_sticks if self.y_key_sticks else self.y_unit
         points = []
         for item in self.data_list:
             x = item.get(self.x_key, 0.0)
-            y = item.get(self.y_key, 0.0)
+            y = item.get(stick_key, 0.0)
             if abs(y) > 1e-12:
                 points.append((x, y))
 
@@ -251,38 +277,56 @@ class SpectrumWidget(QWidget):
                 writer = csv.writer(f)
                 # Header
                 x_head = self.x_unit if self.x_unit else "X"
-                y_head = self.y_unit if self.y_unit else "Y"
+                y_head = stick_unit if stick_unit else "Y"
                 writer.writerow([x_head, y_head])
                 for x, y in points:
                     writer.writerow([x, y])
             return True
-        except Exception:
+        except (OSError, IndexError, ValueError):
             return False
 
     def set_scaling(self, factor):
+        """Apply an intensity scaling factor to the broadened curve and redraw."""
         self.scaling_factor = factor
         self.plot_spectrum()
 
     def set_dual_axis(self, enable):
+        """Toggle a secondary Y-axis for the stick data and redraw."""
         self.use_dual_axis = enable
         # Clear twin axis if disabling
         if not enable and getattr(self, "ax2", None) is not None:
             try:
                 self.ax2.remove()
                 del self.ax2
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (AttributeError, ValueError, NotImplementedError) as e:
+                logging.debug(
+                    "Spectrum widget: could not remove the secondary (twin) axis: %s", e
+                )
         self.plot_spectrum()
 
     def plot_spectrum(self):
+        """Redraw the full plot: broadened curve, sticks, markers and axis ranges."""
         self._is_plotting = True
         try:
             self.canvas.axes.clear()
             if getattr(self, "ax2", None) is not None:
                 try:
                     self.ax2.clear()
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
+                except (AttributeError, ValueError, NotImplementedError) as e:
+                    logging.debug(
+                        "Spectrum widget: could not clear the secondary (twin) axis: %s",
+                        e,
+                    )
+
+            # Re-connect straight after the clear that dropped them: clear()
+            # installs a fresh CallbackRegistry, and the "No Data" path below
+            # returns before the end of this method, which used to leave the
+            # axes with no listener at all — the toolbar's zoom then stopped
+            # emitting range_changed and the range boxes silently desynced
+            # until the next successful plot. _on_axes_changed no-ops while
+            # _is_plotting is set, so connecting this early costs nothing.
+            self.canvas.axes.callbacks.connect("xlim_changed", self._on_axes_changed)
+            self.canvas.axes.callbacks.connect("ylim_changed", self._on_axes_changed)
 
             if getattr(self, "scaling_factor", None) is None:
                 self.scaling_factor = 1.0
@@ -402,8 +446,6 @@ class SpectrumWidget(QWidget):
                         # (handled by min_x range usually)
                         valid_grid = grid_cm[grid_cm > 1.0]
                         valid_curve = curve_y_cm[grid_cm > 1.0]
-                        # x_nm = 1e7 / valid_grid
-                        # np.interp expects sorted x. x_nm will be sorted descending if valid_grid is ascending.
                         curve_y = np.interp(
                             display_x, 1e7 / valid_grid[::-1], valid_curve[::-1]
                         )
@@ -627,10 +669,6 @@ class SpectrumWidget(QWidget):
 
                         self.ax2.set_ylim(-H * zero_frac, H * (1 - zero_frac))
 
-            # Re-connect callbacks (ax.clear() removes them)
-            self.canvas.axes.callbacks.connect("xlim_changed", self._on_axes_changed)
-            self.canvas.axes.callbacks.connect("ylim_changed", self._on_axes_changed)
-
             # Set axis properties
             self.canvas.axes.set_xlabel(self.x_unit)
             self.canvas.axes.set_ylabel(self.y_unit)
@@ -638,10 +676,7 @@ class SpectrumWidget(QWidget):
 
             self._initial_plot_done = True
 
-            # Constrained layout handles padding automatically
-            # try:
-            #     self.canvas.figure.tight_layout()
-            # except: pass
+            # Constrained layout handles padding automatically.
 
             self.canvas.draw_idle()
 
@@ -657,6 +692,7 @@ class SpectrumWidget(QWidget):
         self.plot_spectrum()
 
     def on_click(self, event):
+        """Select the nearest data point to a click, or clear on a double-click/miss."""
         valid_axes = [self.canvas.axes]
         if getattr(self, "ax2", None) is not None:
             valid_axes.append(self.ax2)
@@ -695,14 +731,9 @@ class SpectrumWidget(QWidget):
         best_item = None
         min_dist = float("inf")
 
-        # Use active Y key for validity check
-        t_key = self.y_key_sticks if self.y_key_sticks else self.y_key
-
         for item in self.data_list:
+            # No intensity cutoff: dark states must stay selectable.
             x = item.get(self.x_key, 0.0)
-            item.get(t_key, 0.0)
-            # Remove intensity check to allow selecting dark states
-            # if abs(y) < 1e-12: continue
 
             dist = abs(x - click_x)
             if dist < min_dist:

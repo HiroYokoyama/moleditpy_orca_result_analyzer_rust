@@ -353,6 +353,35 @@ class TestStructureUpdate(_TrajCase):
 
 
 # ---------------------------------------------------------------------------
+# Guards on QTimer.singleShot callbacks scheduled against a possibly-closed
+# dialog (on_step_changed, run_auto_load, load_mep_trj)
+# ---------------------------------------------------------------------------
+
+
+class TestClosedDialogGuards(_TrajCase):
+    def test_on_step_changed_noops_once_closing(self):
+        self.dlg._is_closing = True
+        with patch.object(self.dlg, "update_structure") as upd:
+            with patch.object(self.dlg, "highlight_point") as hl:
+                self.dlg.on_step_changed(1)
+        upd.assert_not_called()
+        hl.assert_not_called()
+
+    def test_run_auto_load_noops_once_closing(self):
+        self.dlg._is_closing = True
+        self.dlg.steps = [{"type": "neb_image", "atoms": None}]
+        with patch.object(self.dlg, "load_external_trj") as load:
+            self.dlg.run_auto_load()
+        load.assert_not_called()
+
+    def test_load_mep_trj_noops_once_closing(self):
+        self.dlg._is_closing = True
+        with patch.object(T.QFileDialog, "getOpenFileName") as opener:
+            self.dlg.load_mep_trj()
+        opener.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Display toggles
 # ---------------------------------------------------------------------------
 
@@ -470,3 +499,23 @@ class TestExports(_TrajCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExternalTrajectoryWithoutEnergies(_TrajCase):
+    def test_frames_without_energies_warn_instead_of_emptying_silently(self):
+        path = os.path.join(self.tmp, "noenergy.xyz")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("1\nframe\nH 0 0 0\n1\nframe\nH 0 0 1\n")
+        before = list(self.dlg.steps)
+        with patch.object(T.QMessageBox, "warning") as warn:
+            self.dlg.load_external_trj(path)
+        warn.assert_called_once()
+        self.assertEqual(self.dlg.steps, before)
+
+    def test_the_silent_auto_load_stays_silent(self):
+        path = os.path.join(self.tmp, "noenergy.xyz")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("1\nframe\nH 0 0 0\n")
+        with patch.object(T.QMessageBox, "warning") as warn:
+            self.dlg.load_external_trj(path, silent=True)
+        warn.assert_not_called()

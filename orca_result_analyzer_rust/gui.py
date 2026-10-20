@@ -1,6 +1,8 @@
+"""Main dialog: file loading, the 3D structure view, atom picking and analysis launchers."""
+
 import os
 from datetime import datetime
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -16,14 +18,17 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QApplication,
 )
-from PyQt6.QtGui import QAction, QIcon, QDesktopServices
-from PyQt6.QtCore import QSize, Qt, QObject, QEvent, QUrl
-from .parser import OrcaParser
+from PySide6.QtGui import QAction, QIcon, QDesktopServices
+from PySide6.QtCore import QSize, Qt, QObject, QEvent, QUrl
+from .loading import load_orca_parser
+from .parser import IMAGINARY_FREQ_THRESHOLD
 from .utils import (
     normalize_atom_symbol,
     determine_bonds_without_dummies,
     list_orca_output_files,
     clear_atom_color_overrides,
+    sync_main_window_file,
+    notify,
 )
 
 
@@ -37,6 +42,7 @@ class _ClickFilter(QObject):
         self._press_pos = None
 
     def eventFilter(self, obj, event):
+        """Fire the press/click callbacks for a non-drag left click on the widget."""
         t = event.type()
         if t == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -58,16 +64,20 @@ class _ClickFilter(QObject):
 
 
 class ElidedLabel(QLabel):
+    """Label that elides its text with an ellipsis to fit the current width."""
+
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full_text = text
         super().setText(text)
 
     def setText(self, text):
+        """Store the full text and redraw it elided to the current width."""
         self._full_text = text
         self._update_elided_text()
 
     def resizeEvent(self, event):
+        """Re-elide the text when the label is resized."""
         super().resizeEvent(event)
         self._update_elided_text()
 
@@ -83,11 +93,9 @@ class ElidedLabel(QLabel):
 try:
     from rdkit import Chem
     from rdkit.Geometry import Point3D
-    from rdkit.Chem import rdDetermineBonds
 except ImportError:
     Chem = None
     Point3D = None
-    rdDetermineBonds = None
 
 # Imported Modules for Analysis
 from .mo_analysis import MODialog  # noqa: E402
@@ -100,6 +108,7 @@ from .nmr_analysis import NMRDialog  # noqa: E402
 from .tddft_analysis import TDDFTDialog  # noqa: E402
 from .thermal_analysis import ThermalTableDialog  # noqa: E402
 from .scf_analysis import SCFTraceDialog  # noqa: E402
+from .nics_bridge import nics_analyzer_available, open_nics_analyzer  # noqa: E402
 
 from . import PLUGIN_VERSION  # noqa: E402
 import logging  # noqa: E402
@@ -160,16 +169,18 @@ class _DirectoryFilePicker(QDialog):
             self.accept()
 
 
-def build_status_suffix(data):
+def build_status_suffix(data: dict) -> tuple[str, int]:
     """Suffix for the status label: imaginary-mode count.
 
     Returns (suffix, imaginary_count). suffix is "" when there is no
-    frequency data or no imaginary modes.
+    frequency data or no imaginary modes. Uses the parser's noise threshold,
+    as the thermochemistry count does, so an unprojected -3 cm-1 rotation
+    does not flag a minimum as a saddle point.
     """
     freqs = data.get("frequencies") or []
     if not freqs:
         return "", 0
-    imag = [f for f in freqs if f.get("freq", 0) < 0]
+    imag = [f for f in freqs if f.get("freq", 0) < -IMAGINARY_FREQ_THRESHOLD]
     if not imag:
         return "", 0
     n = len(imag)
@@ -178,6 +189,11 @@ def build_status_suffix(data):
 
 
 class OrcaResultAnalyzerDialog(QDialog):
+    """Main plugin window: loads ORCA output, drives the 3D view and analysis dialogs."""
+
+    # pylint: disable=attribute-defined-outside-init,access-member-before-definition
+    # Qt pattern: widget attributes are set in init_ui(), called from __init__.
+
     def __init__(self, parent, parser, file_path, context=None):
         super().__init__(parent)
         self.mw = parent
@@ -188,16 +204,34 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.setWindowTitle(f"ORCA Result Analyzer (v{PLUGIN_VERSION})")
         self.resize(450, 600)
         self.setAcceptDrops(True)  # enable folder/file drag-and-drop
+        self._positioned = False
         self.init_ui()
 
         # Install global picking logic
         self._click_filter = None
         self._enable_plotter_picking()
 
-        # Update main window title to reflect ORCA result
-        mw = context.get_main_window() if context is not None else self.mw
-        if mw is not None and hasattr(mw, "init_manager"):
-            mw.init_manager.current_file_path = self.file_path
+        # Only for a real file: an empty analyzer must not blank out the
+        # name of whatever the main window already has open.
+        if self.file_path:
+            host = context.get_main_window() if context is not None else self.mw
+            sync_main_window_file(host, self.file_path, context)
+
+    def showEvent(self, event):
+        """Shift the window right of the WM's default centered position on first show."""
+        super().showEvent(event)
+        # Shift right of the WM's default center-on-parent placement; only
+        # on first show so a later existing.show() (re-raising an
+        # already-open window) doesn't snap it back after the user has
+        # dragged it elsewhere.
+        if not self._positioned:
+            self._positioned = True
+            try:
+                self.move(self.x() + 600, self.y())
+            except (RuntimeError, AttributeError) as e:
+                logging.warning(
+                    "Could not shift the analyzer window position on first show: %s", e
+                )
 
     def get_icon(self, name):
         """Helper to load icon from icon directory"""
@@ -211,6 +245,7 @@ class OrcaResultAnalyzerDialog(QDialog):
     # ------------------------------------------------------------------
 
     def dragEnterEvent(self, event):
+        """Accept a dragged folder or .out file, reject anything else."""
         mime = event.mimeData()
         if mime.hasUrls():
             for url in mime.urls():
@@ -221,6 +256,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         event.ignore()
 
     def dropEvent(self, event):
+        """Open a dropped folder via the file picker, or load a dropped .out directly."""
         for url in event.mimeData().urls():
             local = url.toLocalFile()
             if os.path.isdir(local):
@@ -248,6 +284,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             self.load_file(picker.selected_path)
 
     def init_ui(self):
+        """Build the menu bar, 3D viewer, file info panel and action buttons."""
         layout = QVBoxLayout(self)
 
         # Menu Bar (added as widget since QDialog doesn't have native menu bar)
@@ -317,6 +354,14 @@ class OrcaResultAnalyzerDialog(QDialog):
             act = QAction(label, self)
             act.triggered.connect(slot)
             analysis_menu.addAction(act)
+
+        # NICS lives in a separate plugin; the entry hides while it is absent.
+        analysis_menu.addSeparator()
+        self.nics_action = QAction("NICS Analysis...", self)
+        self.nics_action.triggered.connect(self.show_nics_analysis)
+        analysis_menu.addAction(self.nics_action)
+        analysis_menu.aboutToShow.connect(self._refresh_nics_action)
+        self._refresh_nics_action()
         help_menu = menu_bar.addMenu("&Help")
         about_action = QAction("&About ORCA Result Analyzer", self)
         about_action.triggered.connect(self.show_about)
@@ -633,7 +678,7 @@ class OrcaResultAnalyzerDialog(QDialog):
                 parent=self,
             )
             plotter.installEventFilter(self._click_filter)
-        except Exception as e:
+        except (RuntimeError, AttributeError, KeyError, ValueError) as e:
             logging.error("GUI _enable_plotter_picking failed: %s", e)
 
     def _disable_plotter_picking(self):
@@ -645,8 +690,11 @@ class OrcaResultAnalyzerDialog(QDialog):
             plotter = getattr(v3d, "plotter", None) if v3d else None
             if plotter and self._click_filter:
                 plotter.removeEventFilter(self._click_filter)
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
+        except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+            logging.debug(
+                "Could not remove the atom-picking event filter from the 3D plotter: %s",
+                e,
+            )
         self._click_filter = None
 
     def _pick_atom_at(self, x, y, widget):
@@ -675,7 +723,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             ratio = widget.devicePixelRatioF()
             px = x * ratio
             vtk_y = (widget.height() - y) * ratio
-            picker = vtk.vtkCellPicker()
+            picker = vtk.vtkCellPicker()  # pylint: disable=no-member
             picker.SetTolerance(0.005)
             picker.Pick(px, vtk_y, 0, plotter.renderer)
             if picker.GetActor() is not atom_actor:
@@ -683,7 +731,8 @@ class OrcaResultAnalyzerDialog(QDialog):
             pick_pos = picker.GetPickPosition()
             diffs = atom_positions - np.array(pick_pos)
             return int(np.argmin((diffs**2).sum(axis=1)))
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("GUI _pick_atom_at error: %s", e)
             return None
 
@@ -694,10 +743,13 @@ class OrcaResultAnalyzerDialog(QDialog):
             if best_idx is None:
                 return
             self._pending_click_atom = best_idx
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("GUI press handler error: %s", e)
 
-    def _on_plotter_click(self, x, y, widget):
+    def _on_plotter_click(self, x, y, widget):  # pylint: disable=unused-argument
+        # x/y/widget are unused: fixed _ClickFilter callback signature, position was
+        # already captured by _on_plotter_press.
         try:
             best_idx = getattr(self, "_pending_click_atom", None)
             self._pending_click_atom = None
@@ -731,7 +783,8 @@ class OrcaResultAnalyzerDialog(QDialog):
 
             if hasattr(e3d, "update_selection_visuals"):
                 e3d.update_selection_visuals()
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("GUI click handler error: %s", e)
 
     def close_all_sub_dialogs(self):
@@ -757,34 +810,37 @@ class OrcaResultAnalyzerDialog(QDialog):
                 dlg = getattr(self, attr)
                 if dlg is not None:
                     try:
-                        dlg.close()
-                    except Exception as _e:
-                        logging.warning("silenced: %s", _e)
+                        if dlg.close() is False:
+                            return False
+                    except (RuntimeError, AttributeError) as e:
+                        logging.warning(
+                            "Could not close the %s dialog while resetting the document: %s",
+                            attr,
+                            e,
+                        )
                 setattr(self, attr, None)
+        return True
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
     def closeEvent(self, event):
-        """Ensure all sub-dialogs close when the main analyzer window is closed.
+        """Close every sub-dialog, drop picking, and deregister the window.
 
-        Accept the event directly instead of calling super().closeEvent():
-        QDialog.closeEvent invokes reject(), and reject() is routed back
-        through close() (so Esc runs this cleanup), which would recurse and
-        leave the window visible. event.accept() closes without re-entering.
-
-        Deregistering is part of the cleanup: picking is installed once in
-        __init__, so a window left in the registry gets re-shown by the
-        Extensions menu with its plotter event filter already removed, and
-        atom clicks stay dead for the rest of the session.
+        accept() rather than super().closeEvent(), which would route back
+        through reject() -> close() and recurse. Deregistering matters: a
+        window left in the registry is re-shown with its event filter gone.
         """
+        if not self.close_all_sub_dialogs():
+            event.ignore()
+            return
         self._disable_plotter_picking()
-        self.close_all_sub_dialogs()
         if self.context is not None:
             try:
                 self.context.register_window("analyzer", None)
-            except Exception as exc:  # noqa: BLE001
+            except (RuntimeError, AttributeError) as exc:
                 logging.warning("Could not deregister analyzer window: %s", exc)
         event.accept()
 
@@ -796,11 +852,12 @@ class OrcaResultAnalyzerDialog(QDialog):
             f"<b>ORCA Result Analyzer v{PLUGIN_VERSION}</b><br><br>"
             "Comprehensive analyzer for ORCA quantum chemistry output files.<br><br>"
             "<b>Author:</b> Hiromichi Yokoyama<br>"
-            "<b>License:</b> GPL-3.0 License<br>"
-            '<b>GitHub:</b> <a href="https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin">https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin</a>',
+            "<b>License:</b> LGPL-3.0-or-later License<br>"
+            '<b>GitHub:</b> <a href="https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust_plugin">https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_rust_plugin</a>',
         )
 
     def open_file(self):
+        """Prompt for an .out file to load, or the directory picker on Shift+click."""
         # Shift+click → open directory picker instead
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.open_directory()
@@ -819,7 +876,8 @@ class OrcaResultAnalyzerDialog(QDialog):
     def load_file(self, path):
         """Load a file and update UI"""
         # Close existing dialogs to prevent confusion
-        self.close_all_sub_dialogs()
+        if not self.close_all_sub_dialogs():
+            return
 
         # New result loaded — any atom colors applied to the previous
         # molecule's indices must not bleed onto this (possibly
@@ -827,24 +885,10 @@ class OrcaResultAnalyzerDialog(QDialog):
         clear_atom_color_overrides(self.mw)
 
         try:
-            content = ""
-            encodings = ["utf-8", "utf-16", "latin-1", "cp1252"]
-            found = False
-            for enc in encodings:
-                try:
-                    with open(path, "r", encoding=enc) as f:
-                        content = f.read()
-                    found = True
-                    break
-                except UnicodeError:
-                    continue
-
-            if not found:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-
-            new_parser = OrcaParser()
-            new_parser.load_from_memory(content, path)
+            new_parser = load_orca_parser(path, self)
+            if new_parser is None:  # cancelled by the user
+                notify(self, "Loading cancelled", 3000)
+                return
 
             # --- Auto-load NEB Trajectory if present ---
             # Try to get explicit filename from parser first
@@ -856,8 +900,9 @@ class OrcaResultAnalyzerDialog(QDialog):
                 potential_paths.append(os.path.join(base_dir, parsed_trj))
 
             # Fallback: Standard naming
-            base, ext = os.path.splitext(path)
-            potential_paths.append(base + "_MEP_trj.xyz")
+            base, _ext = os.path.splitext(path)
+            if new_parser.data.get("is_neb"):
+                potential_paths.append(base + "_MEP_trj.xyz")
 
             trj_path = None
             for p in potential_paths:
@@ -883,19 +928,22 @@ class OrcaResultAnalyzerDialog(QDialog):
                             new_parser.data["atoms"] = trj_steps[-1]["atoms"]
                             new_parser.data["coords"] = trj_steps[-1]["coords"]
 
-                        self.context.show_status_message(
+                        notify(
+                            self,
                             f"Loaded NEB Trajectory from {os.path.basename(trj_path)}",
                             5000,
                         )
-                except Exception as e:
-                    logging.warning("silenced: %s", e)
+                # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logging.warning(
+                        "Could not load the NEB trajectory from %s: %s", trj_path, e
+                    )
 
             self.parser = new_parser
             self.file_path = path
 
             # --- Sync with Main Window Title ---
-            if hasattr(self.mw, "init_manager"):
-                self.mw.init_manager.current_file_path = path
+            sync_main_window_file(self.mw, path, self.context)
 
             # Update File Info Labels
             self.update_file_info_labels()
@@ -905,11 +953,10 @@ class OrcaResultAnalyzerDialog(QDialog):
             self.load_structure_3d(fit_camera=True)
             self.update_button_states()
 
-            self.context.show_status_message(
-                f"Successfully loaded: {os.path.basename(path)}", 5000
-            )
+            notify(self, f"Successfully loaded: {os.path.basename(path)}", 5000)
 
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{e}")
 
     def update_file_info_labels(self):
@@ -929,8 +976,10 @@ class OrcaResultAnalyzerDialog(QDialog):
             try:
                 dt = datetime.fromtimestamp(os.path.getmtime(self.file_path))
                 mtime_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except OSError as e:
+                logging.warning(
+                    "Could not read the modification time of %s: %s", self.file_path, e
+                )
 
         if getattr(self, "lbl_updated", None) is not None:
             self.lbl_updated.setText(f"Updated: {mtime_str}")
@@ -976,6 +1025,7 @@ class OrcaResultAnalyzerDialog(QDialog):
                 )
 
     def reload_file(self):
+        """Re-parse and refresh the view from the currently loaded file's path."""
         if self.file_path and os.path.exists(self.file_path):
             self.load_file(self.file_path)
         else:
@@ -984,6 +1034,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             )
 
     def open_output_file(self):
+        """Open the loaded .out file in the OS's default text viewer."""
         if self.file_path and os.path.exists(self.file_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.file_path))
         else:
@@ -1002,6 +1053,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self._open_directory_path(chosen_dir)
 
     def update_button_states(self):
+        """Enable/disable each analysis button based on what the parser found."""
         data = self.parser.data
 
         # Enable MO button if MO coefficients OR orbital energies exist
@@ -1087,6 +1139,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.btn_scf.setToolTip("" if has_scf else "No SCF iteration data found")
 
     def load_structure_3d(self, fit_camera=False):
+        """Build an RDKit mol from the parsed geometry and draw it in the host's 3D view."""
         # Helper to ensure the 3D structure is (re)drawn.
         #
         # Analysis dialogs redraw the optimized/final molecule on popup so the
@@ -1104,10 +1157,11 @@ class OrcaResultAnalyzerDialog(QDialog):
             return
 
         try:
-            mol = Chem.RWMol()
-            conf = Chem.Conformer(len(atoms))
+            mol = Chem.RWMol()  # pylint: disable=no-member
+            conf = Chem.Conformer(len(atoms))  # pylint: disable=no-member
 
             for i, sym in enumerate(atoms):
+                # pylint: disable-next=no-member
                 idx = mol.AddAtom(Chem.Atom(normalize_atom_symbol(sym)))
                 x, y, z = coords[i]
                 conf.SetAtomPosition(idx, Point3D(x, y, z))
@@ -1164,17 +1218,18 @@ class OrcaResultAnalyzerDialog(QDialog):
                         self.mw.view_3d_manager, "plotter"
                     ):
                         self.mw.view_3d_manager.plotter.render()
-                except Exception as _e:
-                    logging.warning("3D camera/render update failed: %s", _e)
+                except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                    logging.warning("3D camera/render update failed: %s", e)
             elif hasattr(self.mw, "view_3d_manager") and hasattr(
                 self.mw.view_3d_manager, "plotter"
             ):
                 # Still render so the redrawn structure is shown immediately.
                 try:
                     self.mw.view_3d_manager.plotter.render()
-                except Exception as _e:
-                    logging.warning("3D render update failed: %s", _e)
-        except Exception as e:
+                except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                    logging.warning("3D render update failed: %s", e)
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error(
                 "[gui.py:load_structure_3d] Failed to load 3D structure: %s",
                 e,
@@ -1182,6 +1237,7 @@ class OrcaResultAnalyzerDialog(QDialog):
             )
 
     def show_mo_analyzer(self):
+        """Open the MO Analyzer dialog on the parsed orbital coefficients/energies."""
         self.load_structure_3d()
         mo_coeffs = self.parser.data.get("mo_coeffs", None)
         orb_energies = self.parser.data.get("orbital_energies", None)
@@ -1201,6 +1257,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.mo_dlg.show()
 
     def show_freq(self):
+        """Open the Frequency dialog on the parsed vibrational modes."""
         self.load_structure_3d()  # Reset to final structure before opening
         freqs = self.parser.data.get("frequencies", [])
         if not freqs:
@@ -1219,6 +1276,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.freq_dlg.show()
 
     def show_trajectory(self):
+        """Open the Trajectory/NEB dialog on the parsed optimization or scan steps."""
         data = self.parser.data.get("scan_steps", [])
         if not data:
             QMessageBox.warning(
@@ -1259,7 +1317,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "conv_graph_dlg", None) is not None:
             try:
                 self.conv_graph_dlg.close()
-            except Exception:
+            except (RuntimeError, AttributeError):
                 logging.debug(
                     "Closing previous convergence graph failed", exc_info=True
                 )
@@ -1267,6 +1325,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.conv_graph_dlg.show()
 
     def show_forces(self):
+        """Open the Force Viewer, or the convergence graph directly on Shift+click."""
         # Shift+click → open convergence graph directly instead
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.show_convergence_graph_direct()
@@ -1291,6 +1350,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.forces_dlg.show()
 
     def show_thermal(self):
+        """Open the Thermochemistry dialog on the parsed thermal data."""
         self.load_structure_3d()
         data = self.parser.data.get("thermal", {})
         if not data:
@@ -1305,6 +1365,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.thermal_dlg.show()
 
     def show_tddft(self):
+        """Open the TD-DFT dialog on the parsed excitation energies."""
         self.load_structure_3d()
         excitations = self.parser.data.get("tddft", [])
         if not excitations:
@@ -1320,6 +1381,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.tddft_dlg.show()
 
     def show_dipole(self):
+        """Open the Dipole Moment dialog on the parsed dipole data."""
         self.load_structure_3d()
         d = self.parser.data.get("dipoles", None)
         if not d:
@@ -1334,6 +1396,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.dipole_dlg.show()
 
     def show_charges(self):
+        """Open the Atomic Charges dialog on the parsed charge schemes."""
         self.load_structure_3d()
         charges = self.parser.data.get("charges", {})
         if not charges:
@@ -1348,6 +1411,7 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.charges_dlg.show()
 
     def show_nmr(self):
+        """Open the NMR dialog on the parsed shielding and coupling data."""
         self.load_structure_3d()
         data = self.parser.data.get("nmr_shielding", [])
         couplings = self.parser.data.get("nmr_couplings", [])
@@ -1357,13 +1421,42 @@ class OrcaResultAnalyzerDialog(QDialog):
             )
             return
         if getattr(self, "nmr_dlg", None) is not None and self.nmr_dlg is not None:
-            self.nmr_dlg.close()
+            if self.nmr_dlg.close() is False:
+                return
         self.nmr_dlg = NMRDialog(
             self, data, couplings=couplings, file_path=self.file_path
         )
         self.nmr_dlg.show()
 
+    def _nics_host(self):
+        """Main window to search for the NICS Analyzer plugin."""
+        if self.context is not None:
+            try:
+                return self.context.get_main_window()
+            except (AttributeError, RuntimeError):
+                logging.debug("get_main_window failed", exc_info=True)
+        return self.mw
+
+    def _refresh_nics_action(self):
+        """Show the NICS entry only while that plugin is installed."""
+        action = getattr(self, "nics_action", None)
+        if action is None:
+            return
+        action.setVisible(nics_analyzer_available(self._nics_host()))
+
+    def show_nics_analysis(self):
+        """Hand the current file to the NICS Analyzer plugin, if installed."""
+        ok, message = open_nics_analyzer(
+            self._nics_host(),
+            self.file_path,
+            exclude_action=getattr(self, "nics_action", None),
+        )
+        if not ok:
+            QMessageBox.information(self, "NICS Analysis", message)
+        self._refresh_nics_action()
+
     def show_scf_trace(self):
+        """Open the SCF Trace dialog on the parsed convergence iterations."""
         self.load_structure_3d()
         data = self.parser.data.get("scf_traces", [])
         if not data:
@@ -1380,17 +1473,19 @@ class OrcaResultAnalyzerDialog(QDialog):
         self.scf_dlg.show()
 
     def show_properties(self):
+        """Open the general Properties dialog on the full parsed data dict."""
         from .property_analysis import PropertiesDialog
 
         if getattr(self, "props_dlg", None) is not None:
             try:
                 self.props_dlg.close()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError) as e:
+                logging.warning("Could not close the existing properties dialog: %s", e)
         self.props_dlg = PropertiesDialog(self, self.parser.data)
         self.props_dlg.show()
 
     def show_bond_analysis(self):
+        """Open the Bond Analysis dialog on Mayer bond orders and NBO results."""
         from .bond_analysis import BondAnalysisDialog
 
         data = self.parser.data
@@ -1404,12 +1499,15 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "bond_dlg", None) is not None:
             try:
                 self.bond_dlg.close()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError) as e:
+                logging.warning(
+                    "Could not close the existing bond-analysis dialog: %s", e
+                )
         self.bond_dlg = BondAnalysisDialog(self, data)
         self.bond_dlg.show()
 
     def show_energy_components(self):
+        """Open the Energy Components dialog on the parsed post-HF energy terms."""
         from .energy_analysis import EnergyComponentsDialog
 
         if not self.parser.data.get("energy_components"):
@@ -1422,7 +1520,9 @@ class OrcaResultAnalyzerDialog(QDialog):
         if getattr(self, "energy_dlg", None) is not None:
             try:
                 self.energy_dlg.close()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError) as e:
+                logging.warning(
+                    "Could not close the existing energy-components dialog: %s", e
+                )
         self.energy_dlg = EnergyComponentsDialog(self, self.parser.data)
         self.energy_dlg.show()

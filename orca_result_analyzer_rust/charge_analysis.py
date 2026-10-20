@@ -1,9 +1,10 @@
+"""Atomic Charges dialog: table, color-scheme gradient mapping and CSV export."""
+
 import csv
 import os
-import json
 import numpy as np
 import pyvista as pv
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -22,26 +23,32 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
 )
-from PyQt6.QtGui import QColor, QPainter, QLinearGradient
-from PyQt6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QLinearGradient
+from PySide6.QtCore import Qt
 import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap
-from .utils import get_default_export_path, save_json_atomic
+from .utils import get_default_export_path, notify
+from .settings import load_section, save_section
 import logging
 
 
 # GradientBar Widget
 class GradientBar(QWidget):
+    """Widget painting a horizontal color gradient bar for the charge scale."""
+
     def __init__(self, parent=None, colors=None):
         super().__init__(parent)
         self.colors = colors if colors is not None else ["red", "white", "blue"]
         self.setFixedHeight(30)
 
     def set_colors(self, colors):
+        """Replace the gradient's color stops and repaint."""
         self.colors = colors
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # pylint: disable=unused-argument
+        # Qt override signature requires the event argument.
+        """Fill the widget with the gradient and draw a border around it."""
         painter = QPainter(self)
         grad = self.get_gradient()
         painter.fillRect(self.rect(), grad)
@@ -51,6 +58,7 @@ class GradientBar(QWidget):
         painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
 
     def get_gradient(self):
+        """Build a QLinearGradient spanning the widget from the stored colors."""
         grad = QLinearGradient(0, 0, self.width(), 0)
 
         n = len(self.colors)
@@ -64,6 +72,11 @@ class GradientBar(QWidget):
 
 
 class ChargeDialog(QDialog):
+    """Dialog listing per-atom charges with 3D color-mapping and CSV export."""
+
+    # pylint: disable=attribute-defined-outside-init,access-member-before-definition
+    # Qt/PyVista pattern: label/actor/state attrs are created lazily, not in __init__.
+
     def __init__(self, parent, all_charges):
         super().__init__(parent)
         self.parent_dlg = parent  # OrcaResultAnalyzerDialog
@@ -81,16 +94,13 @@ class ChargeDialog(QDialog):
         }
 
         # Load custom schemes from settings.json
-        settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
+        self.settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
         self.current_scheme = "Red(-) - White - Blue(+)"
 
-        if os.path.exists(settings_file):
+        if os.path.exists(self.settings_file):
             try:
-                with open(settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-
                 # Load from "charge_settings" key
-                settings_data = all_settings.get("charge_settings", {})
+                settings_data = load_section(self.settings_file, "charge_settings")
 
                 # Load custom schemes
                 if "custom_color_schemes" in settings_data:
@@ -103,8 +113,8 @@ class ChargeDialog(QDialog):
                 # Load last used scheme
                 if "last_charge_scheme" in settings_data:
                     self.current_scheme = settings_data["last_charge_scheme"]
-            except Exception as e:
-                logging.warning("Error loading settings: %s", e)
+            except (TypeError, AttributeError) as e:
+                logging.warning("Error loading charge settings: %s", e)
 
         main_layout = QVBoxLayout(self)
 
@@ -150,6 +160,12 @@ class ChargeDialog(QDialog):
         btn_custom.clicked.connect(self.edit_custom_scheme)
         scheme_row.addWidget(btn_custom)
         view_layout.addLayout(scheme_row)
+
+        # A saved scheme that no longer exists (deleted or malformed custom
+        # entry) used to KeyError here and abort opening the dialog.
+        if self.current_scheme not in self.schemes:
+            self.current_scheme = "Red(-) - White - Blue(+)"
+            self.combo_scheme.setCurrentText(self.current_scheme)
 
         # Gradient Bar
         self.grad_bar = GradientBar(self, self.schemes[self.current_scheme])
@@ -203,7 +219,7 @@ class ChargeDialog(QDialog):
 
         btn_close = QPushButton("Close")
         btn_close.setFixedWidth(100)
-        btn_close.clicked.connect(self.accept)
+        btn_close.clicked.connect(self.close)  # accept() skips closeEvent (Qt >= 6.3)
         bottom_row.addWidget(btn_close)
 
         main_layout.addLayout(bottom_row)
@@ -211,10 +227,12 @@ class ChargeDialog(QDialog):
         self.update_table()
 
     def on_type_change(self, text):
+        """Switch the displayed charge type when the combo box selection changes."""
         self.current_type = text
         self.update_table()
 
     def on_scheme_change(self, text):
+        """Apply the newly-selected color scheme to the gradient bar and save it."""
         self.current_scheme = text
         colors = self.schemes.get(text, ["red", "white", "blue"])
         self.grad_bar.set_colors(colors)
@@ -269,17 +287,6 @@ class ChargeDialog(QDialog):
 
     def save_settings(self):
         """Save all settings to settings.json"""
-        settings_file = os.path.join(os.path.dirname(__file__), "settings.json")
-
-        # Load existing settings or create new
-        all_settings = {}
-        if os.path.exists(settings_file):
-            try:
-                with open(settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-
         # Prepare charge-specific data
         charge_data = {}
 
@@ -294,13 +301,7 @@ class ChargeDialog(QDialog):
         charge_data["custom_color_schemes"] = custom_schemes
         charge_data["last_charge_scheme"] = self.current_scheme
 
-        # Update main settings dict
-        all_settings["charge_settings"] = charge_data
-
-        try:
-            save_json_atomic(settings_file, all_settings)
-        except Exception as e:
-            logging.warning("Error saving settings: %s", e)
+        save_section(self.settings_file, "charge_settings", charge_data)
 
     def toggle_labels(self):
         """Toggle charge value labels in 3D view"""
@@ -311,8 +312,11 @@ class ChargeDialog(QDialog):
             for actor in self._charge_labels:
                 try:
                     self.parent_dlg.mw.plotter.remove_actor(actor)
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
+                except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                    logging.debug(
+                        "Charge analysis: could not remove an old charge label actor: %s",
+                        e,
+                    )
             self._charge_labels = []
 
         if not show:
@@ -350,7 +354,8 @@ class ChargeDialog(QDialog):
                 self._charge_labels.append(actor)
 
             self.parent_dlg.mw.plotter.render()
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.warning(self, "Error", f"Could not add labels: {e}")
             self.chk_show_labels.setChecked(False)
 
@@ -377,16 +382,22 @@ class ChargeDialog(QDialog):
                 try:
                     self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
                     delattr(self, "_charge_scalar_bar")
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
+                except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                    logging.debug(
+                        "Charge analysis: could not remove the charge scalar bar actor: %s",
+                        e,
+                    )
 
             # Remove labels if exist
             if getattr(self, "_charge_labels", None) is not None:
                 for actor in self._charge_labels:
                     try:
                         self.parent_dlg.mw.plotter.remove_actor(actor)
-                    except Exception as _e:
-                        logging.warning("silenced: %s", _e)
+                    except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                        logging.debug(
+                            "Charge analysis: could not remove an old charge label actor: %s",
+                            e,
+                        )
                 self._charge_labels = []
                 self.chk_show_labels.setChecked(False)
 
@@ -398,13 +409,13 @@ class ChargeDialog(QDialog):
             if hasattr(self.parent_dlg.mw, "plotter"):
                 self.parent_dlg.mw.plotter.render()
 
-            self.parent_dlg.context.show_status_message(
-                "Colors reset to CPK default.", 5000
-            )
-        except Exception as e:
+            notify(self, "Colors reset to CPK default.", 5000)
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to reset colors:\n{e}")
 
     def update_table(self):
+        """Rebuild the charge table's columns and rows for the current type."""
         data = self.all_charges.get(self.current_type, [])
         if not data:
             self.table.setRowCount(0)
@@ -492,6 +503,7 @@ class ChargeDialog(QDialog):
                 self.table.setItem(r, c, QTableWidgetItem(val_str))
 
     def apply_colors(self):
+        """Recolor the 3D atoms by charge using the current gradient scheme."""
         data = self.all_charges.get(self.current_type, [])
         if not data:
             return
@@ -569,8 +581,16 @@ class ChargeDialog(QDialog):
                         for actor in self._charge_labels:
                             try:
                                 self.parent_dlg.mw.plotter.remove_actor(actor)
-                            except Exception as _e:
-                                logging.warning("silenced: %s", _e)
+                            except (
+                                RuntimeError,
+                                AttributeError,
+                                KeyError,
+                                ValueError,
+                            ) as e:
+                                logging.debug(
+                                    "Charge analysis: could not remove an old charge label actor: %s",
+                                    e,
+                                )
 
                     self._charge_labels = []
                     for i, item in enumerate(data):
@@ -589,8 +609,8 @@ class ChargeDialog(QDialog):
             # Add scalar bar legend showing charge scale with color gradient
             try:
                 # Create a mesh with charge values to display scalar bar
-                vmin = min(charges)
-                vmax = max(charges)
+                vmin = -max_c
+                vmax = max_c
 
                 # Convert scheme colors to colormap
                 cmap_colors = [mcolors.to_rgb(QColor(c).name()) for c in colors]
@@ -602,8 +622,11 @@ class ChargeDialog(QDialog):
                 if getattr(self, "_charge_scalar_bar", None) is not None:
                     try:
                         self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
-                    except Exception as _e:
-                        logging.warning("silenced: %s", _e)
+                    except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                        logging.debug(
+                            "Charge analysis: could not remove the old charge scalar bar actor: %s",
+                            e,
+                        )
 
                 # Create dummy mesh for scalar bar
                 dummy = pv.Box()
@@ -630,21 +653,22 @@ class ChargeDialog(QDialog):
                         "color": "white",
                     },
                 )
-            except Exception as e:
+            # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logging.warning("Error adding scalar bar: %s", e)
 
             # Trigger update
             if hasattr(self.parent_dlg.mw, "plotter"):
                 self.parent_dlg.mw.plotter.render()
 
-            self.parent_dlg.context.show_status_message(
-                f"Applied '{self.current_scheme}' coloring to 3D view.", 5000
-            )
+            notify(self, f"Applied '{self.current_scheme}' coloring to 3D view.", 5000)
 
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to color atoms:\n{e}")
 
     def export_csv(self):
+        """Prompt for a path and write the current charge table to CSV."""
         if getattr(self, "_csv_exporting", False):
             return
         self._csv_exporting = True
@@ -727,15 +751,15 @@ class ChargeDialog(QDialog):
                         row.append(item.get(k, ""))
                     writer.writerow(row)
             # QMessageBox.information(self, "Success", f"Data exported to {filename}")
-            self.parent_dlg.context.show_status_message(
-                f"Data exported to {filename}", 5000
-            )
-        except Exception as e:
+            notify(self, f"Data exported to {filename}", 5000)
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
         finally:
             self._csv_exporting = False
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
@@ -745,16 +769,22 @@ class ChargeDialog(QDialog):
         if getattr(self, "_charge_scalar_bar", None) is not None:
             try:
                 self.parent_dlg.mw.plotter.remove_actor(self._charge_scalar_bar)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                logging.debug(
+                    "Charge analysis: could not remove the charge scalar bar actor on close: %s",
+                    e,
+                )
 
         # Remove labels
         if getattr(self, "_charge_labels", None) is not None:
             for actor in self._charge_labels:
                 try:
                     self.parent_dlg.mw.plotter.remove_actor(actor)
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
+                except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                    logging.debug(
+                        "Charge analysis: could not remove a charge label actor on close: %s",
+                        e,
+                    )
 
         if hasattr(self.parent_dlg.mw, "plotter"):
             self.parent_dlg.mw.plotter.render()

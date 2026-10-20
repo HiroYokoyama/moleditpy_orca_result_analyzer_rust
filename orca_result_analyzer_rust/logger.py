@@ -38,7 +38,7 @@ class Logger:
             fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
             fh.setFormatter(formatter)
             logger.addHandler(fh)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             print(f"Failed to setup file logging: {e}")
 
         return logger

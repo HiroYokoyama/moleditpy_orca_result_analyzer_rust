@@ -19,11 +19,14 @@ Reuses the headless Qt/matplotlib/pyvista stubs from test_nmr_mo_fixes.
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tests.test_nmr_mo_fixes import NMRDialog, _make_nmr_dialog, _nmr_mod
+from tests.test_nmr_mo_fixes import NMRDialog, _make_nmr_dialog, _nmr_mod  # noqa: F401
+
+_merge_mod = sys.modules["orca_result_analyzer_rust.nmr_merge"]
 
 
 def _dialog_with_file(tmpdir):
@@ -52,7 +55,7 @@ class TestAtomicSave(unittest.TestCase):
 
             dlg.merged_peaks = [{"indices": [3, 4]}]
             with patch.object(
-                _nmr_mod, "save_json_atomic", side_effect=OSError("disk full")
+                _merge_mod, "save_json_atomic", side_effect=OSError("disk full")
             ):
                 NMRDialog.save_merged_peaks(dlg)  # must not raise
 
@@ -141,7 +144,7 @@ class TestMergeGuards(unittest.TestCase):
         dlg.peaks_metadata = [(1.0, 1.0, False, [0])]
         dlg.selected_peak_indices = {3, 4}
 
-        with patch.object(_nmr_mod, "QMessageBox") as mb:
+        with patch.object(_merge_mod, "QMessageBox") as mb:
             NMRDialog.merge_selected_peaks(dlg)
             mb.warning.assert_called_once()
             mb.question.assert_not_called()
@@ -159,7 +162,7 @@ class TestMergeGuards(unittest.TestCase):
         ]
         dlg.selected_peak_indices = {0, 1}
 
-        with patch.object(_nmr_mod, "QMessageBox") as mb:
+        with patch.object(_merge_mod, "QMessageBox") as mb:
             NMRDialog.merge_selected_peaks(dlg)
             mb.question.assert_not_called()  # no false conflict
 

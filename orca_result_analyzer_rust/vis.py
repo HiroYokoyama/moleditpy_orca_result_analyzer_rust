@@ -1,3 +1,5 @@
+"""Cube file loading and isosurface rendering for MO/NICS visualization."""
+
 import logging
 import numpy as np
 import pyvista as pv
@@ -7,6 +9,8 @@ BOHR_TO_ANG = 0.529177249
 
 
 class CubeVisualizer:
+    """Loads a Gaussian-cube file and renders it as +/- isosurfaces in the 3D view."""
+
     def __init__(self, mw):
         self.mw = mw
         self.plotter = mw.plotter
@@ -14,13 +18,15 @@ class CubeVisualizer:
         self.actors = {}
 
     def load_file(self, filename):
+        """Parse a cube file and build its structured grid; return success as bool."""
         try:
             # Parse using simple internal parser or pyvista if robust
             # We use internal to ensure consistency with our writer
             meta = self._parse_cube(filename)
             self.current_grid = self._build_grid(meta)
             return True
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error loading cube: %s", e)
             return False
 
@@ -129,12 +135,19 @@ class CubeVisualizer:
         opacity=0.5,
         style="surface",
         smooth_shading=True,
+        name_prefix="mo_iso",
     ):
+        """Render the +/- lobes.
+
+        *name_prefix* namespaces the actors so several orbitals can be on
+        screen at once (the compare dialog gives each slot its own prefix).
+        """
         if not self.current_grid:
             return
 
-        self.plotter.remove_actor("mo_iso_p")
-        self.plotter.remove_actor("mo_iso_n")
+        name_p, name_n = f"{name_prefix}_p", f"{name_prefix}_n"
+        self.plotter.remove_actor(name_p)
+        self.plotter.remove_actor(name_n)
 
         try:
             iso_p = self.current_grid.contour([isovalue], scalars="values")
@@ -143,7 +156,7 @@ class CubeVisualizer:
                     iso_p,
                     color=color_p,
                     opacity=opacity,
-                    name="mo_iso_p",
+                    name=name_p,
                     style=style,
                     point_size=5,
                     smooth_shading=smooth_shading,
@@ -155,17 +168,19 @@ class CubeVisualizer:
                     iso_n,
                     color=color_n,
                     opacity=opacity,
-                    name="mo_iso_n",
+                    name=name_n,
                     style=style,
                     point_size=5,
                     smooth_shading=smooth_shading,
                 )
 
             self.plotter.render()
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Iso error: %s", e)
 
-    def clear(self):
-        self.plotter.remove_actor("mo_iso_p")
-        self.plotter.remove_actor("mo_iso_n")
+    def clear(self, name_prefix="mo_iso"):
+        """Remove the +/- isosurface actors for the given name prefix."""
+        self.plotter.remove_actor(f"{name_prefix}_p")
+        self.plotter.remove_actor(f"{name_prefix}_n")
         self.plotter.render()

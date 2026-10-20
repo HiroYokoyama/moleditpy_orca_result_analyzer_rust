@@ -4,7 +4,7 @@ Unit tests for DipoleDialog's pure logic: the update_view arrow builder
 (center-of-mass, reverse toggle, zero-magnitude guard, actor clearing) and the
 settings load/save round-trip.
 
-PyQt6 is stubbed so the module imports headlessly; numpy/pyvista are real.
+PySide6 is stubbed so the module imports headlessly; numpy/pyvista are real.
 The dialog's Qt constructor is bypassed (object.__new__) with lightweight
 fakes for the checkboxes/spin boxes and a recording plotter. pyvista.Arrow is
 patched to capture the direction/scale it is handed.
@@ -30,6 +30,7 @@ def _assert_close(testcase, actual, expected, tol=1e-6):
     testcase.assertEqual(len(actual), len(expected))
     for a, e in zip(actual, expected):
         testcase.assertAlmostEqual(a, e, delta=tol)
+
 
 # Load dipole_analysis in isolation (own copy of the Qt/pyvista stubs, restored
 # afterwards so the shared stubs other test modules rely on stay untouched).
@@ -100,6 +101,7 @@ def _bare_dialog(dipole_data, coords, show=True, reverse=False, scale=2.0, res=2
     inst.chk_reverse = _FakeCheck(reverse)
     inst.spin_scale = _FakeSpin(scale)
     inst.spin_res = _FakeSpin(res)
+    inst.spin_alpha = _FakeSpin(1.0)
     return inst
 
 
@@ -140,9 +142,13 @@ class TestUpdateView(unittest.TestCase):
         _assert_close(self, self.arrow_calls[0]["start"], [1.0, 0.0, 0.0])
 
     def test_reverse_flips_direction(self):
-        fwd = _bare_dialog({"vector": [0.0, 0.0, 3.0]}, coords=[[0, 0, 0]], reverse=False)
+        fwd = _bare_dialog(
+            {"vector": [0.0, 0.0, 3.0]}, coords=[[0, 0, 0]], reverse=False
+        )
         fwd.update_view()
-        rev = _bare_dialog({"vector": [0.0, 0.0, 3.0]}, coords=[[0, 0, 0]], reverse=True)
+        rev = _bare_dialog(
+            {"vector": [0.0, 0.0, 3.0]}, coords=[[0, 0, 0]], reverse=True
+        )
         rev.update_view()
         _assert_close(self, self.arrow_calls[0]["direction"], [0, 0, 1])
         _assert_close(self, self.arrow_calls[1]["direction"], [0, 0, -1])
@@ -198,8 +204,11 @@ class TestSettings(unittest.TestCase):
             settings = os.path.join(d, "settings.json")
 
             dlg = _bare_dialog(
-                {"vector": [1, 0, 0]}, coords=[[0, 0, 0]],
-                show=True, reverse=False, res=42,
+                {"vector": [1, 0, 0]},
+                coords=[[0, 0, 0]],
+                show=True,
+                reverse=False,
+                res=42,
             )
             dlg.arrow_color = "#ff0000"
             dlg.settings_file = settings
@@ -213,8 +222,11 @@ class TestSettings(unittest.TestCase):
             self.assertFalse(on_disk["reverse"])
 
             other = _bare_dialog(
-                {"vector": [1, 0, 0]}, coords=[[0, 0, 0]],
-                show=False, reverse=True, res=20,
+                {"vector": [1, 0, 0]},
+                coords=[[0, 0, 0]],
+                show=False,
+                reverse=True,
+                res=20,
             )
             other.btn_color = MagicMock()
             other.settings_file = settings
@@ -246,6 +258,56 @@ class TestSettings(unittest.TestCase):
             tempfile.gettempdir(), "dipole_does_not_exist_xyz.json"
         )
         dlg.load_settings()  # must not raise
+
+    def test_save_preserves_several_other_dialogs_sections(self):
+        with tempfile.TemporaryDirectory() as d:
+            settings = os.path.join(d, "settings.json")
+            others = {
+                "mo_settings": {"iso": 0.02},
+                "nmr_settings": {"ref": "TMS"},
+                "thermal_settings": {"show_details": True},
+            }
+            with open(settings, "w", encoding="utf-8") as f:
+                json.dump(others, f)
+
+            dlg = _bare_dialog({"vector": [1, 0, 0]}, coords=[[0, 0, 0]])
+            dlg.settings_file = settings
+            dlg.save_settings()
+
+            with open(settings, encoding="utf-8") as f:
+                on_disk = json.load(f)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertIn("dipole_settings", on_disk)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        with tempfile.TemporaryDirectory() as d:
+            settings = os.path.join(d, "settings.json")
+            dlg = _bare_dialog(
+                {"vector": [1, 0, 0]}, coords=[[0, 0, 0]], show=True, res=17
+            )
+            dlg.arrow_color = "#123456"
+            dlg.settings_file = settings
+            dlg.save_settings()
+
+            section = S.load_section(settings, "dipole_settings")
+            self.assertEqual(section["res"], 17)
+            self.assertEqual(section["color"], "#123456")
+
+    def test_non_numeric_res_does_not_crash_load(self):
+        # int(settings["res"]) raises ValueError; the narrowed handler must
+        # swallow it instead of crashing the dialog.
+        with tempfile.TemporaryDirectory() as d:
+            settings = os.path.join(d, "settings.json")
+            with open(settings, "w", encoding="utf-8") as f:
+                json.dump({"dipole_settings": {"res": "not_a_number"}}, f)
+
+            dlg = _bare_dialog({"vector": [1, 0, 0]}, coords=[[0, 0, 0]])
+            dlg.btn_color = MagicMock()
+            dlg.settings_file = settings
+            dlg.load_settings()  # must not raise
+            self.assertEqual(dlg.spin_res.value(), 20)
 
 
 if __name__ == "__main__":

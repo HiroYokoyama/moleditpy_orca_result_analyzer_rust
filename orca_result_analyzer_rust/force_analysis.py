@@ -1,9 +1,10 @@
+"""Force Analysis dialog: gradient/force table, 3D vector overlay and convergence graph."""
+
 import os
-import json
 import math
 import numpy as np
 import pyvista as pv
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -19,7 +20,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
+from .loading import load_orca_parser
+from .settings import load_section, save_section
 import logging
 
 try:
@@ -35,6 +38,8 @@ except ImportError:
 
 
 class ConvergenceGraphDialog(QDialog):
+    """Dialog plotting optimization convergence metrics against their thresholds."""
+
     def __init__(self, parent, traj_steps, current_idx=None):
         super().__init__(parent)
         self.setWindowTitle("Convergence Thresholds")
@@ -74,6 +79,7 @@ class ConvergenceGraphDialog(QDialog):
         self.redraw_graph()
 
     def redraw_graph(self):
+        """Replot the convergence graph for the currently selected metric."""
         self.figure.clear()
         selection = self.metric_combo.currentText()
         if not isinstance(selection, str) or not selection:
@@ -83,7 +89,7 @@ class ConvergenceGraphDialog(QDialog):
 
     def export_csv(self):
         """Export convergence data to CSV."""
-        from PyQt6.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
         import csv
 
         display_keys = {
@@ -121,8 +127,6 @@ class ConvergenceGraphDialog(QDialog):
             rows.append(row)
 
         if not rows:
-            from PyQt6.QtWidgets import QMessageBox
-
             QMessageBox.warning(self, "No Data", "No convergence data to export.")
             return
 
@@ -137,15 +141,13 @@ class ConvergenceGraphDialog(QDialog):
                 writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
-            from PyQt6.QtWidgets import QMessageBox
-
             QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
-        except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
-
+        except (ImportError, OSError, IndexError, ValueError) as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
-    def plot_data(self, traj_steps, current_idx, selection="All"):
+    def plot_data(self, traj_steps, current_idx, selection="All"):  # pylint: disable=unused-argument
+        # current_idx is unused: the graph has no per-step highlight, unlike the trajectory plot.
+        """Draw the selected convergence metric(s) with threshold lines and markers."""
         display_keys = {
             "rms gradient": "RMS Grad",
             "max gradient": "MAX Grad",
@@ -303,8 +305,8 @@ class ConvergenceGraphDialog(QDialog):
                     ]
                     yticks.append(targets[k])
                     ax.set_yticks(yticks)
-                except Exception as _e:
-                    logging.warning("Failed to add threshold tick: %s", _e)
+                except (IndexError, TypeError, ValueError) as e:
+                    logging.warning("Failed to add threshold tick: %s", e)
 
                 # Draw a triangle marker on the side of the Y-axis
                 try:
@@ -333,8 +335,9 @@ class ConvergenceGraphDialog(QDialog):
                         markersize=7,
                         zorder=5,
                     )
-                except Exception as _e:
-                    logging.warning("Failed to draw threshold marker on axis: %s", _e)
+                # C++ library boundary: matplotlib rendering exceptions do not map to Python types
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logging.warning("Failed to draw threshold marker on axis: %s", e)
 
             ax.set_ylabel(name, color=color, fontsize=9)
             ax.tick_params(axis="y", colors=color, labelsize=8)
@@ -364,6 +367,11 @@ class ConvergenceGraphDialog(QDialog):
 
 
 class ForceViewerDialog(QDialog):
+    """Dialog showing gradients/forces per atom with an optional 3D vector overlay."""
+
+    # pylint: disable=attribute-defined-outside-init
+    # Qt/PyVista pattern: label/actor/state attrs are created lazily, not in __init__.
+
     def __init__(self, parent_dlg, gradients, parser=None):
         super().__init__(parent_dlg)
         self.setWindowTitle("Force Analysis")
@@ -515,8 +523,12 @@ class ForceViewerDialog(QDialog):
                 # If currently visualizing, update
                 if self.btn_visualize.isChecked():
                     self.update_vectors()
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning(
+                "Force analysis: could not auto-scale the gradient vector display: %s",
+                e,
+            )
 
     def _setup_trajectory_controls(self, layout):
         """Setup trajectory navigation controls"""
@@ -628,6 +640,7 @@ class ForceViewerDialog(QDialog):
         layout.insertWidget(0, traj_group)
 
     def show_convergence_graph(self):
+        """Open (or refresh) the convergence-threshold graph window."""
         if getattr(self, "traj_steps", None) is None or not self.traj_steps:
             QMessageBox.warning(
                 self, "No Data", "No trajectory convergence data available."
@@ -638,8 +651,11 @@ class ForceViewerDialog(QDialog):
         if getattr(self, "graph_dlg", None) is not None:
             try:
                 self.graph_dlg.close()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError) as e:
+                logging.warning(
+                    "Force analysis: could not close the existing convergence graph window: %s",
+                    e,
+                )
 
         # pass current_step_idx so it can draw a vertical line for the current frame
         current_idx = getattr(self, "current_step_idx", None)
@@ -713,9 +729,12 @@ class ForceViewerDialog(QDialog):
         else:
             # Historical step
             step = self.traj_steps[val]
-            energy = step.get("energy", 0.0)
+            energy = step.get("energy")
             self.traj_label.setText(f"Step {val + 1}/{num_steps}")
-            self.traj_info.setText(f"Energy: {energy:.8f} Eh")
+            self.traj_info.setText(
+                f"Energy: {energy:.8f} Eh" if energy is not None
+                else "Energy: not available"
+            )
 
             # Update convergence info
             self._update_conv_label(step.get("convergence", {}))
@@ -818,26 +837,15 @@ class ForceViewerDialog(QDialog):
             return
 
         try:
-            content = ""
-            encodings = ["utf-8", "utf-16", "latin-1", "cp1252"]
-            found = False
-            for enc in encodings:
-                try:
-                    with open(self.parser.filename, "r", encoding=enc) as f:
-                        content = f.read()
-                    found = True
-                    break
-                except UnicodeError:
-                    continue
+            fresh = load_orca_parser(self.parser.filename, self)
+            if fresh is None:  # cancelled by the user
+                return
 
-            if not found:
-                with open(
-                    self.parser.filename, "r", encoding="utf-8", errors="replace"
-                ) as f:
-                    content = f.read()
-
-            # Re-parse (using the already initialized parser)
-            self.parser.load_from_memory(content, self.parser.filename)
+            # Refresh in place — the other dialogs hold this parser object.
+            self.parser.data.clear()
+            self.parser.data.update(fresh.data)
+            self.parser.lines = fresh.lines
+            self.parser.raw_content = fresh.raw_content
 
             # Update local state
             self.gradients = self.parser.data.get("gradients", [])
@@ -873,11 +881,11 @@ class ForceViewerDialog(QDialog):
 
             # Update force table and vectors
             self.populate_force_table()
-            # self.auto_scale() # Use button only
             if self.btn_visualize.isChecked():
                 self.update_vectors()
 
-        except Exception as e:
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
             QMessageBox.critical(self, "Error", f"Failed to reload data: {e}")
         finally:
             self._reloading = False
@@ -887,7 +895,6 @@ class ForceViewerDialog(QDialog):
         try:
             from rdkit import Chem
             from rdkit.Geometry import Point3D
-            from rdkit.Chem import rdDetermineBonds
             from .utils import normalize_atom_symbol, determine_bonds_without_dummies
         except ImportError:
             return
@@ -895,8 +902,8 @@ class ForceViewerDialog(QDialog):
         if not hasattr(self, "_pt"):
             self._pt = Chem.GetPeriodicTable()
 
-        mol = Chem.RWMol()
-        conf = Chem.Conformer()
+        mol = Chem.RWMol()  # pylint: disable=no-member
+        conf = Chem.Conformer()  # pylint: disable=no-member
         pt = self._pt
 
         try:
@@ -907,18 +914,20 @@ class ForceViewerDialog(QDialog):
                 conf.SetAtomPosition(
                     i, Point3D(coords[i][0], coords[i][1], coords[i][2])
                 )
-        except Exception:
+        except (RuntimeError, AttributeError, IndexError, ValueError):
             return
 
         mol.AddConformer(conf)
 
         # Determine bonds and bond orders on every load (no animation in this view).
-        if rdDetermineBonds:
-            try:
-                charge = self.parser.data.get("charge", 0) if self.parser else 0
-                determine_bonds_without_dummies(mol, charge=charge, bond_orders=True)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+        try:
+            charge = self.parser.data.get("charge", 0) if self.parser else 0
+            determine_bonds_without_dummies(mol, charge=charge, bond_orders=True)
+        except (RuntimeError, AttributeError, ValueError) as e:
+            logging.warning(
+                "Force analysis: could not determine bonds/bond orders for the trajectory frame: %s",
+                e,
+            )
 
         final_mol = mol.GetMol()
 
@@ -980,6 +989,8 @@ class ForceViewerDialog(QDialog):
 
     def update_vectors(self):
         """Update the force vectors in the 3D visualizer"""
+        if getattr(self, "_is_closing", False):
+            return
         try:
             mw = None
             if hasattr(self.parent_dlg, "context") and self.parent_dlg.context:
@@ -1030,9 +1041,6 @@ class ForceViewerDialog(QDialog):
                 # Force = -Gradient
                 force = np.array([-vec[0], -vec[1], -vec[2]])
 
-                # Reverse if requested
-                # if hasattr(self, 'chk_reverse') and self.chk_reverse.isChecked():
-                #     force = -force
                 magnitude = np.linalg.norm(force)
 
                 if magnitude < 1e-12:
@@ -1063,7 +1071,8 @@ class ForceViewerDialog(QDialog):
 
             mw.plotter.render()
 
-        except Exception as e:
+        # C++ library boundary: RDKit/VTK/pyvista exceptions do not map to Python types
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning("Error drawing force vectors: %s", e)
 
     def clear_vectors(self):
@@ -1080,66 +1089,56 @@ class ForceViewerDialog(QDialog):
         for actor in self.actors:
             try:
                 mw.plotter.remove_actor(actor)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError, KeyError, ValueError) as e:
+                logging.debug(
+                    "Force analysis: could not remove a force-vector actor: %s", e
+                )
 
         self.actors = []
         mw.plotter.render()
 
     def reject(self):
+        """Route Esc through close() so closeEvent cleanup always runs."""
         # Esc must run closeEvent cleanup (QDialog.reject only hides)
         self.close()
 
     def closeEvent(self, event):
         """Clean up when dialog closes"""
+        self._is_closing = True
         self.clear_vectors()
         self.save_settings()
         if getattr(self, "graph_dlg", None) is not None:
             try:
                 self.graph_dlg.close()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
+            except (RuntimeError, AttributeError) as e:
+                logging.warning(
+                    "Force analysis: could not close the convergence graph window on close: %s",
+                    e,
+                )
             self.graph_dlg = None
         # accept() not super().closeEvent(): QDialog.closeEvent calls reject(),
         # which is routed back through close() and would recurse.
         event.accept()
 
     def load_settings(self):
+        """Restore the saved force-vector color."""
         if os.path.exists(self.settings_file):
+            settings = load_section(self.settings_file, "force_settings")
             try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-
-                settings = all_settings.get("force_settings", {})
-
                 # Note: 'scale' is intentionally NOT loaded to allow auto-scaling based on specific molecule data
 
                 if "force_color" in settings:
                     self.force_color = settings["force_color"]
 
-            except Exception as e:
+            except (KeyError, IndexError, ValueError) as e:
                 logging.warning("Error loading force settings: %s", e)
 
     def save_settings(self):
-        all_settings = {}
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-
+        """Persist the force-vector color."""
         force_settings = {
             # "scale": self.spin_scale.value(), # Do not save scale
             # "reverse_vector": self.chk_reverse.isChecked() if hasattr(self, 'chk_reverse') else True,
             "force_color": self.force_color
         }
 
-        all_settings["force_settings"] = force_settings
-
-        try:
-            from .utils import save_json_atomic
-
-            save_json_atomic(self.settings_file, all_settings)
-        except Exception as e:
-            logging.warning("Error saving force settings: %s", e)
+        save_section(self.settings_file, "force_settings", force_settings)

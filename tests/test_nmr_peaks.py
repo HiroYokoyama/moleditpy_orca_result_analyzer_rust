@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import gui_harness  # noqa: E402
 
 N = gui_harness.load_isolated("nmr_analysis")
+NE = sys.modules[f"{N.__package__}.nmr_export"]  # export_* now live here
 
 
 def _data():
@@ -293,6 +294,39 @@ class TestReferences(_NMRCase):
         saved = json.load(open(self.dlg.settings_file, encoding="utf-8"))
         self.assertEqual(saved["mo_settings"], {"last_preset": "Default"})
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        others = {
+            "mo_settings": {"iso": 0.02},
+            "dipole_settings": {"res": 20},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.dlg.settings_file, "w", encoding="utf-8") as fh:
+            json.dump(others, fh)
+
+        self.dlg.linewidth = 2.5
+        self.dlg.save_settings()
+
+        with open(self.dlg.settings_file, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertAlmostEqual(on_disk["nmr_settings"]["spectrum_linewidth"], 2.5)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        self.dlg.linewidth = 3.5
+        self.dlg.save_settings()
+
+        section = S.load_section(self.dlg.settings_file, "nmr_settings")
+        self.assertAlmostEqual(section["spectrum_linewidth"], 3.5)
+
+    def test_malformed_custom_references_do_not_crash_load(self):
+        # A non-dict value for a nucleus's refs makes refs.items() raise
+        # AttributeError; the narrowed handler must swallow it, not crash.
+        with open(self.dlg.settings_file, "w", encoding="utf-8") as fh:
+            json.dump({"nmr_settings": {"custom_references": {"1H": "not_a_dict"}}}, fh)
+        self.dlg.load_settings()  # must not raise
+
 
 # ---------------------------------------------------------------------------
 # Selection and labels
@@ -355,13 +389,13 @@ class TestSelectionAndLabels(_NMRCase):
 class TestSpectrumExport(_NMRCase):
     def test_the_csv_is_written(self):
         path = os.path.join(self.tmp, "spec.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_spectrum_csv()
         self.assertTrue(os.path.exists(path))
 
     def test_the_stick_csv_records_shift_intensity_and_atoms(self):
         path = os.path.join(self.tmp, "spec.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_spectrum_csv()
         with open(path, encoding="utf-8") as fh:
             rows = [r for r in csv.reader(fh) if r]
@@ -372,7 +406,7 @@ class TestSpectrumExport(_NMRCase):
         # patched out here, so publish the peak model directly.
         self.dlg.peaks_metadata = self.dlg._get_current_peaks()
         path = os.path.join(self.tmp, "spec.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_spectrum_csv()
         with open(path, encoding="utf-8") as fh:
             rows = [r for r in csv.reader(fh) if r]
@@ -382,19 +416,19 @@ class TestSpectrumExport(_NMRCase):
         self.dlg.merged_peaks = [{"indices": [1, 2, 3]}]
         self.dlg.peaks_metadata = self.dlg._get_current_peaks()
         path = os.path.join(self.tmp, "spec.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_spectrum_csv()
         self.assertIn("1;2;3", open(path, encoding="utf-8").read())
 
     def test_without_peak_data_the_csv_says_so(self):
         self.dlg.peaks_metadata = []
         path = os.path.join(self.tmp, "spec.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_spectrum_csv()
         self.assertIn("No peak data", open(path, encoding="utf-8").read())
 
     def test_a_cancelled_export_writes_nothing(self):
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=("", "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=("", "")):
             self.dlg.export_spectrum_csv()
         self.assertFalse([f for f in os.listdir(self.tmp) if f.endswith(".csv")])
 

@@ -175,3 +175,20 @@ class TestDeleteCustomReference(_RefCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeletedReferenceRecalculates(_RefCase):
+    def test_replacement_reference_updates_displayed_shifts_and_plot(self):
+        self.dlg.reference_standards["1H"]["MyRef"] = {"sigma_ref": 40.0, "delta_ref": 0.0}
+        self.dlg.update_reference_combo()
+        self.dlg.combo_ref.setCurrentText("MyRef")
+        self.dlg.displayed_data = [self.dlg.data[1]]
+        self.dlg.on_ref_change()
+        self.dlg.recalc()
+        self.assertEqual(self.dlg.table.item(0, 3).text(), "10.00")
+        self.dlg.plot_spectrum.reset_mock()
+        with patch.object(N.QMessageBox, "question", return_value=N.QMessageBox.StandardButton.Yes):
+            self.dlg.delete_custom_reference()
+        self.assertEqual(self.dlg.combo_ref.currentText(), "TMS")
+        self.assertEqual(self.dlg.table.item(0, 3).text(), "1.80")
+        self.dlg.plot_spectrum.assert_called_once()

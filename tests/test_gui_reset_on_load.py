@@ -13,11 +13,11 @@ from unittest.mock import MagicMock, patch
 
 # Stub Qt (mirrors tests/test_about_menu.py's bootstrap so this file is
 # self-sufficient regardless of test collection order).
-if "PyQt6.QtWidgets" in sys.modules:
-    qtw = sys.modules["PyQt6.QtWidgets"]
+if "PySide6.QtWidgets" in sys.modules:
+    qtw = sys.modules["PySide6.QtWidgets"]
 else:
     qtw = MagicMock()
-    sys.modules["PyQt6.QtWidgets"] = qtw
+    sys.modules["PySide6.QtWidgets"] = qtw
 
 if not hasattr(qtw, "QLabel") or "Mock" in type(getattr(qtw, "QLabel")).__name__:
 
@@ -112,11 +112,11 @@ if not hasattr(qtw, "QDialog") or "Mock" in type(getattr(qtw, "QDialog")).__name
 
     qtw.QDialog = _QDialog
 
-if "PyQt6" not in sys.modules:
-    sys.modules["PyQt6"] = MagicMock()
-if "PyQt6.QtCore" not in sys.modules:
-    sys.modules["PyQt6.QtCore"] = MagicMock()
-qt_core = sys.modules["PyQt6.QtCore"]
+if "PySide6" not in sys.modules:
+    sys.modules["PySide6"] = MagicMock()
+if "PySide6.QtCore" not in sys.modules:
+    sys.modules["PySide6.QtCore"] = MagicMock()
+qt_core = sys.modules["PySide6.QtCore"]
 if (
     not hasattr(qt_core, "QObject")
     or "Mock" in type(getattr(qt_core, "QObject")).__name__
@@ -132,8 +132,8 @@ if (
             return MagicMock()
 
     qt_core.QObject = _QObject
-if "PyQt6.QtGui" not in sys.modules:
-    sys.modules["PyQt6.QtGui"] = MagicMock()
+if "PySide6.QtGui" not in sys.modules:
+    sys.modules["PySide6.QtGui"] = MagicMock()
 
 if "matplotlib.backends.backend_qtagg" not in sys.modules:
     sys.modules["matplotlib.backends.backend_qtagg"] = MagicMock()
@@ -142,6 +142,19 @@ if "pyvista" not in sys.modules:
 
 from orca_result_analyzer_rust.gui import OrcaResultAnalyzerDialog  # noqa: E402
 from orca_result_analyzer_rust.parser import OrcaParser  # noqa: E402
+
+
+# Keep patches attached to the module captured by this dialog class. Other
+# test modules temporarily replace package/module attributes during collection.
+_GUI_MODULE = sys.modules[OrcaResultAnalyzerDialog.__module__]
+
+
+def _patch_gui(target, *args, **kwargs):
+    owner = _GUI_MODULE
+    parts = target.split(".")
+    for name in parts[:-1]:
+        owner = getattr(owner, name)
+    return unittest.mock.patch.object(owner, parts[-1], *args, **kwargs)
 
 
 class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
@@ -159,7 +172,7 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
 
     def test_load_file_calls_clear_atom_color_overrides(self):
         dlg = self._make_dialog()
-        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
+        with _patch_gui("clear_atom_color_overrides") as mock_clear:
             # Path need not exist: the reset call happens before file I/O,
             # and any read failure is caught internally by load_file().
             dlg.load_file("/nonexistent/path/calc.out")
@@ -168,7 +181,7 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
     def test_load_file_clears_overrides_even_on_read_failure(self):
         """A missing/unreadable file must not skip the override reset."""
         dlg = self._make_dialog()
-        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
+        with _patch_gui("clear_atom_color_overrides") as mock_clear:
             try:
                 dlg.load_file("/definitely/does/not/exist.out")
             except Exception as exc:  # load_file must swallow read errors
@@ -178,7 +191,7 @@ class TestLoadFileClearsAtomColorOverrides(unittest.TestCase):
     def test_load_file_clears_before_closing_sub_dialogs_is_also_called(self):
         """Both cleanup steps must run on every load, in the same call."""
         dlg = self._make_dialog()
-        with patch("orca_result_analyzer_rust.gui.clear_atom_color_overrides") as mock_clear:
+        with _patch_gui("clear_atom_color_overrides") as mock_clear:
             dlg.load_file("/nonexistent/path/calc.out")
             dlg.close_all_sub_dialogs.assert_called_once()
             mock_clear.assert_called_once()

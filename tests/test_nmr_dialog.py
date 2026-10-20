@@ -26,6 +26,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import gui_harness  # noqa: E402
 
 N = gui_harness.load_isolated("nmr_analysis")
+NM = sys.modules[f"{N.__package__}.nmr_merge"]
+NE = sys.modules[f"{N.__package__}.nmr_export"]  # export_table_csv now lives here
 
 
 class _FakeItem:
@@ -137,9 +139,7 @@ class _NMRCase(unittest.TestCase):
 class TestMergedPeaksPath(unittest.TestCase):
     def test_path_is_derived_from_the_result_file(self):
         path = N.NMRDialog._merged_peaks_path("/results/job.out", _data())
-        self.assertEqual(
-            path, os.path.join("/results", "job-nmr_peak_info.json")
-        )
+        self.assertEqual(path, os.path.join("/results", "job-nmr_peak_info.json"))
 
     def test_extension_is_replaced_not_appended(self):
         path = N.NMRDialog._merged_peaks_path("/r/calc.property.txt", _data())
@@ -162,8 +162,11 @@ class TestMergedPeaksPath(unittest.TestCase):
 
     def test_fingerprint_ignores_dict_key_order(self):
         reordered = [
-            {"atom_sym": d["atom_sym"], "shielding": d["shielding"],
-             "atom_idx": d["atom_idx"]}
+            {
+                "atom_sym": d["atom_sym"],
+                "shielding": d["shielding"],
+                "atom_idx": d["atom_idx"],
+            }
             for d in _data()
         ]
         self.assertEqual(
@@ -452,6 +455,22 @@ class TestMerge(_NMRCase):
 
 
 class TestMergePersistence(_NMRCase):
+    def test_failed_explicit_save_keeps_changes_dirty(self):
+        self.dlg.merged_peaks = [{"indices": [1, 2]}]
+        self.dlg._merged_dirty = True
+        self.dlg.btn_save_merge.setEnabled(True)
+        # A parent that is a file makes the destination genuinely unwritable.
+        blocker = os.path.join(self.tmp, "blocker")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("file")
+        self.dlg.merged_peaks_file = os.path.join(blocker, "merges.json")
+        with patch.object(N.QMessageBox, "warning") as warning, patch.object(NM, "notify") as note:
+            self.dlg.save_merges_clicked()
+        self.assertTrue(self.dlg._merged_dirty)
+        self.assertTrue(self.dlg.btn_save_merge.isEnabled())
+        warning.assert_called_once()
+        note.assert_not_called()
+
     def test_saving_writes_the_groups(self):
         self.dlg.merged_peaks = [{"indices": [1, 2, 3]}]
         self.dlg.save_merged_peaks()
@@ -494,11 +513,11 @@ class TestMergePersistence(_NMRCase):
         with open(self.dlg.merged_peaks_file, "w", encoding="utf-8") as fh:
             json.dump(
                 [
-                    {"indices": [1, 2]},   # good
-                    {"indices": []},       # empty
-                    {"indices": "12"},     # not a list
-                    {"nope": [1]},         # wrong key
-                    "garbage",             # not a dict
+                    {"indices": [1, 2]},  # good
+                    {"indices": []},  # empty
+                    {"indices": "12"},  # not a list
+                    {"nope": [1]},  # wrong key
+                    "garbage",  # not a dict
                     {"indices": [1, True]},  # bools are not atom indices
                 ],
                 fh,
@@ -516,9 +535,7 @@ class TestFilterAndExport(_NMRCase):
     def test_filtering_narrows_the_displayed_nuclei(self):
         self.dlg.current_nucleus = "H"
         self.dlg.apply_filter()
-        self.assertEqual(
-            [d["atom_idx"] for d in self.dlg.displayed_data], [1, 2, 3]
-        )
+        self.assertEqual([d["atom_idx"] for d in self.dlg.displayed_data], [1, 2, 3])
 
     def test_the_all_filter_shows_every_nucleus(self):
         self.dlg.current_nucleus = "All"
@@ -534,14 +551,14 @@ class TestFilterAndExport(_NMRCase):
         self._set_reference(delta_ref=0.0, sigma_ref=31.8)
         self.dlg.recalc()
         path = os.path.join(self.tmp, "table.csv")
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=(path, "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=(path, "")):
             self.dlg.export_table_csv()
         with open(path, encoding="utf-8") as fh:
             rows = list(csv.reader(fh))
         self.assertEqual(len(rows), 5)  # header + 4 nuclei
 
     def test_export_table_cancelled_writes_nothing(self):
-        with patch.object(N.QFileDialog, "getSaveFileName", return_value=("", "")):
+        with patch.object(NE.QFileDialog, "getSaveFileName", return_value=("", "")):
             self.dlg.export_table_csv()
         self.assertFalse([f for f in os.listdir(self.tmp) if f.endswith(".csv")])
 

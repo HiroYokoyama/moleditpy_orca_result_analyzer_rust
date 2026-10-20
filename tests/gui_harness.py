@@ -2,7 +2,7 @@
 tests/gui_harness.py
 Isolated headless-Qt loader for instantiation-style coverage tests.
 
-Every other test module in this suite installs its own partial PyQt6 stub into
+Every other test module in this suite installs its own partial PySide6 stub into
 the shared ``sys.modules`` and relies on those exact objects at run time. So we
 must NOT mutate the shared stubs in a way that outlives our own imports.
 
@@ -43,9 +43,20 @@ class _PermissiveMeta(type):
 
 
 _NOOP_METHODS = (
-    "closeEvent", "showEvent", "resizeEvent", "keyPressEvent", "paintEvent",
-    "moveEvent", "accept", "reject", "done", "close", "setWindowTitle",
-    "resize", "setLayout", "setAcceptDrops",
+    "closeEvent",
+    "showEvent",
+    "resizeEvent",
+    "keyPressEvent",
+    "paintEvent",
+    "moveEvent",
+    "accept",
+    "reject",
+    "done",
+    "close",
+    "setWindowTitle",
+    "resize",
+    "setLayout",
+    "setAcceptDrops",
 )
 
 
@@ -62,6 +73,13 @@ def _noop(self, *a, **k):
 # skipped, so names registered here raise AttributeError instead.
 ABSENT_ATTRS = {
     "scaling_factor",
+    "context",  # utils.notify() needs this absent when unset, not a MagicMock
+    # utils.notify()'s owner-chain hops: a dialog that doesn't set one of
+    # these must see it as absent, not get a phantom MagicMock that hijacks
+    # the walk before it reaches a real self.parent().
+    "parent_dlg",
+    "freq_dialog",
+    "parent_dialog",
 }
 
 
@@ -863,9 +881,7 @@ def _real_tree(root, wanted):
         return {n: _real_cache[n] for n in wanted}
 
     stub_backup = {
-        k: v
-        for k, v in sys.modules.items()
-        if k == root or k.startswith(root + ".")
+        k: v for k, v in sys.modules.items() if k == root or k.startswith(root + ".")
     }
     for k in stub_backup:
         del sys.modules[k]
@@ -905,11 +921,11 @@ def _pyvista_module():
 
 
 class qt_available:
-    """Context manager making ``PyQt6.QtWidgets`` importable *at call time*.
+    """Context manager making ``PySide6.QtWidgets`` importable *at call time*.
 
     ``load_isolated`` restores sys.modules once a module is imported, but some
     methods import Qt lazily inside the function body (e.g.
-    ``from PyQt6.QtWidgets import QInputDialog`` in save_custom_preset). Wrap
+    ``from PySide6.QtWidgets import QInputDialog`` in save_custom_preset). Wrap
     such calls in this to install a stub package for the duration, optionally
     overriding individual names::
 
@@ -917,7 +933,7 @@ class qt_available:
             dialog.save_custom_preset()
     """
 
-    _KEYS = ("PyQt6", "PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui")
+    _KEYS = ("PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui")
 
     def __init__(self, **overrides):
         self._overrides = overrides
@@ -925,24 +941,25 @@ class qt_available:
     def __enter__(self):
         self._saved = {k: sys.modules.get(k, _SENTINEL) for k in self._KEYS}
 
-        pkg = types.ModuleType("PyQt6")
+        pkg = types.ModuleType("PySide6")
         pkg.__path__ = []
         widgets = _fresh_module(
-            "PyQt6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
+            "PySide6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
         )
-        core = _fresh_module("PyQt6.QtCore", _QTC_BASES, _make_widget)
-        gui = _fresh_module("PyQt6.QtGui", [], _make_widget,
-                            extra={"QColor": QColorStub})
+        core = _fresh_module("PySide6.QtCore", _QTC_BASES, _make_widget)
+        gui = _fresh_module(
+            "PySide6.QtGui", [], _make_widget, extra={"QColor": QColorStub}
+        )
         for name, value in self._overrides.items():
             setattr(widgets, name, value)
         pkg.QtWidgets, pkg.QtCore, pkg.QtGui = widgets, core, gui
 
         sys.modules.update(
             {
-                "PyQt6": pkg,
-                "PyQt6.QtWidgets": widgets,
-                "PyQt6.QtCore": core,
-                "PyQt6.QtGui": gui,
+                "PySide6": pkg,
+                "PySide6.QtWidgets": widgets,
+                "PySide6.QtCore": core,
+                "PySide6.QtGui": gui,
             }
         )
         return widgets
@@ -975,9 +992,9 @@ _load_counter = [0]
 
 # sys.modules keys we swap for the duration of an isolated load.
 _SWAP_KEYS = [
-    "PyQt6.QtWidgets",
-    "PyQt6.QtCore",
-    "PyQt6.QtGui",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
     "matplotlib.backends.backend_qtagg",
     "pyvista",
     # Other test modules leave permanent numpy/matplotlib fakes behind; the
@@ -991,15 +1008,16 @@ _SWAP_KEYS = [
 
 
 def load_isolated(modname):
-    _ensure_module("PyQt6")
+    _ensure_module("PySide6")
 
     swapped = {
-        "PyQt6.QtWidgets": _fresh_module(
-            "PyQt6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
+        "PySide6.QtWidgets": _fresh_module(
+            "PySide6.QtWidgets", _QTW_BASES, _make_widget, extra=_stateful_widgets()
         ),
-        "PyQt6.QtCore": _fresh_module("PyQt6.QtCore", _QTC_BASES, _make_widget),
-        "PyQt6.QtGui": _fresh_module("PyQt6.QtGui", [], _make_widget,
-                                     extra={"QColor": QColorStub}),
+        "PySide6.QtCore": _fresh_module("PySide6.QtCore", _QTC_BASES, _make_widget),
+        "PySide6.QtGui": _fresh_module(
+            "PySide6.QtGui", [], _make_widget, extra={"QColor": QColorStub}
+        ),
         "pyvista": _pyvista_module(),
     }
     swapped.update(_real_tree("numpy", {"numpy": ("linspace", "exp", "zeros_like")}))
@@ -1056,9 +1074,15 @@ def load_isolated(modname):
 # ---------------------------------------------------------------------------
 
 _NAMED = {
-    "red": (255, 0, 0), "green": (0, 128, 0), "blue": (0, 0, 255),
-    "white": (255, 255, 255), "black": (0, 0, 0), "purple": (128, 0, 128),
-    "cyan": (0, 255, 255), "yellow": (255, 255, 0), "gray": (128, 128, 128),
+    "red": (255, 0, 0),
+    "green": (0, 128, 0),
+    "blue": (0, 0, 255),
+    "white": (255, 255, 255),
+    "black": (0, 0, 0),
+    "purple": (128, 0, 128),
+    "cyan": (0, 255, 255),
+    "yellow": (255, 255, 0),
+    "gray": (128, 128, 128),
 }
 
 

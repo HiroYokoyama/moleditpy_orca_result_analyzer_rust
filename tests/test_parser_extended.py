@@ -8,20 +8,14 @@ All tests load OrcaParser directly (no Qt stubs required).
 
 import os
 import sys
-import importlib.util
 import unittest
 
-_PARSER_SRC = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "orca_result_analyzer_rust", "parser.py")
-)
+sys.path.insert(0, os.path.dirname(__file__))
+from _parser_loader import load_standalone_parser  # noqa: E402
 
 
 def _load_parser():
-    spec = importlib.util.spec_from_file_location("orca_parser_ext", _PARSER_SRC)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["orca_parser_ext"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_standalone_parser("orca_parser_ext")
 
 
 _parser_mod = _load_parser()
@@ -66,10 +60,11 @@ Final Gibbs Free Energy    ...    -99.5 Eh
 
 
 class TestParseThermal(unittest.TestCase):
-
     def test_electronic_energy(self):
         p = _parse_method(_THERMAL_CONTENT, "parse_thermal")
-        self.assertAlmostEqual(p.data["thermal"]["electronic_energy"], -76.12345, places=4)
+        self.assertAlmostEqual(
+            p.data["thermal"]["electronic_energy"], -76.12345, places=4
+        )
 
     def test_zero_point_energy(self):
         p = _parse_method(_THERMAL_CONTENT, "parse_thermal")
@@ -89,7 +84,9 @@ class TestParseThermal(unittest.TestCase):
 
     def test_temperature_parsed(self):
         p = _parse_method(_THERMAL_CONTENT, "parse_thermal")
-        self.assertAlmostEqual(p.data["thermal"].get("temperature", 0.0), 298.15, places=2)
+        self.assertAlmostEqual(
+            p.data["thermal"].get("temperature", 0.0), 298.15, places=2
+        )
 
     def test_minimal_gibbs(self):
         p = _parse_method(_THERMAL_MINIMAL, "parse_thermal")
@@ -138,8 +135,27 @@ SPIN DOWN ORBITALS
 """
 
 
-class TestParseOrbitalEnergies(unittest.TestCase):
+# UHF as real ORCA actually prints it: an "ORBITAL ENERGIES" header followed
+# by "SPIN UP/DOWN ORBITALS" sub-blocks whose column header sits on the very
+# next line (NO "---" separator), with a blank line between the two spins.
+_ORBITAL_UHF_REAL = """\
+ORBITAL ENERGIES
+----------------
+                 SPIN UP ORBITALS
+  NO   OCC          E(Eh)            E(eV)
+    0   1.0000     -19.36210      -526.86960
+    1   1.0000      -1.34548       -36.61250
+    2   0.0000       0.25639         6.97690
 
+                 SPIN DOWN ORBITALS
+  NO   OCC          E(Eh)            E(eV)
+    0   1.0000     -19.33005      -525.99760
+    1   0.0000       0.30000         8.16340
+---
+"""
+
+
+class TestParseOrbitalEnergies(unittest.TestCase):
     def test_restricted_count(self):
         p = _parse_method(_ORBITAL_RESTRICTED, "parse_orbital_energies")
         self.assertEqual(len(p.data["orbital_energies"]), 3)
@@ -186,6 +202,29 @@ class TestParseOrbitalEnergies(unittest.TestCase):
         p = _parse_method("", "parse_orbital_energies")
         self.assertEqual(p.data["orbital_energies"], [])
 
+    def test_uhf_real_format_both_spins(self):
+        """Real ORCA UHF layout (header on next line, no '---') must split spins."""
+        p = _parse_method(_ORBITAL_UHF_REAL, "parse_orbital_energies")
+        spins = {mo["spin"] for mo in p.data["orbital_energies"]}
+        self.assertIn("alpha", spins)
+        self.assertIn("beta", spins)
+        self.assertNotIn("restricted", spins)
+
+    def test_uhf_real_format_counts(self):
+        """Alpha block (3 orbitals) and beta block (2 orbitals) must both be read."""
+        p = _parse_method(_ORBITAL_UHF_REAL, "parse_orbital_energies")
+        alpha = [o for o in p.data["orbital_energies"] if o["spin"] == "alpha"]
+        beta = [o for o in p.data["orbital_energies"] if o["spin"] == "beta"]
+        self.assertEqual(len(alpha), 3)
+        self.assertEqual(len(beta), 2)
+
+    def test_uhf_real_format_beta_energies(self):
+        """Beta manifold must carry its own energies, not be dropped."""
+        p = _parse_method(_ORBITAL_UHF_REAL, "parse_orbital_energies")
+        beta = [o for o in p.data["orbital_energies"] if o["spin"] == "beta"]
+        self.assertAlmostEqual(beta[0]["energy_eh"], -19.33005, places=4)
+        self.assertAlmostEqual(beta[1]["energy_eh"], 0.30000, places=4)
+
 
 # ---------------------------------------------------------------------------
 # TestParseFrequenciesIR
@@ -224,6 +263,25 @@ Mode   freq   mass   T^2    TX     TY     TZ
     5:  3754.93  1.089   3.456  0.00  0.00  1.86
 """
 
+# As ORCA 5 writes it: the transition dipole derivative in parentheses after
+# the intensity columns. 5.07^2 = 25.7049, matching the T**2 column.
+_FREQ_WITH_IR_DERIV = """\
+VIBRATIONAL FREQUENCIES
+-----------------------
+   0:         0.00 cm**-1
+   1:         0.00 cm**-1
+   2:         0.00 cm**-1
+   3:      1623.45 cm**-1
+
+IR SPECTRUM
+-----------
+
+ Mode   freq       eps      Int      T**2         TX        TY        TZ
+       cm**-1   L/(mol*cm) km/mol    a.u.
+----------------------------------------------------------------------------
+    3:  1623.45   0.005000   25.678  25.7049  ( 0.000000  0.000000  5.070000)
+"""
+
 _FREQ_WITH_RAMAN = """\
 VIBRATIONAL FREQUENCIES
 -----------------------
@@ -244,7 +302,6 @@ Mode   freq   Activity   DepolarP
 
 
 class TestParseFrequenciesIR(unittest.TestCase):
-
     def test_ir_intensities_assigned(self):
         p = _parse_method(_FREQ_WITH_IR, "parse_frequencies")
         # Mode 3 has IR intensity 25.678
@@ -265,14 +322,56 @@ class TestParseFrequenciesIR(unittest.TestCase):
         self.assertAlmostEqual(p.data["frequencies"][4]["raman"], 12.345, places=2)
 
 
+class TestParseDipoleDerivative(unittest.TestCase):
+    """The (TX TY TZ) group each IR row carries, in atomic units."""
+
+    def test_the_triple_is_read_from_the_parentheses(self):
+        line = "  10:    537.95   0.002935   14.83  0.001702  ( 0.040181 -0.009108  0.002223)"
+        self.assertEqual(
+            OrcaParser._parse_dipole_derivative(line),
+            (0.040181, -0.009108, 0.002223),
+        )
+
+    def test_a_row_without_the_group_is_not_an_error(self):
+        """Older ORCA prints the intensity columns and stops."""
+        self.assertIsNone(
+            OrcaParser._parse_dipole_derivative("    3:  1623.45  1.234  25.678")
+        )
+
+    def test_a_malformed_group_is_rejected_rather_than_guessed(self):
+        for bad in (
+            "  1:  100.0  ( 0.1 0.2 )",  # only two components
+            "  1:  100.0  ( 0.1 0.2 abc)",  # not a number
+        ):
+            with self.subTest(line=bad):
+                self.assertIsNone(OrcaParser._parse_dipole_derivative(bad))
+
+    def test_the_derivative_lands_on_the_mode(self):
+        p = _parse_method(_FREQ_WITH_IR_DERIV, "parse_frequencies")
+        self.assertEqual(p.data["frequencies"][3]["dipole_deriv"], (0.0, 0.0, 5.07))
+
+    def test_its_square_is_the_t2_column_orca_printed(self):
+        """ORCA's T**2 is |dmu/dQ|^2, so the parse can be checked against
+        the program's own arithmetic rather than against itself."""
+        p = _parse_method(_FREQ_WITH_IR_DERIV, "parse_frequencies")
+        mode = p.data["frequencies"][3]
+        self.assertAlmostEqual(
+            sum(c * c for c in mode["dipole_deriv"]), 25.7049, places=4
+        )
+
+    def test_modes_outside_the_ir_table_carry_no_derivative(self):
+        p = _parse_method(_FREQ_WITH_IR_DERIV, "parse_frequencies")
+        self.assertIsNone(p.data["frequencies"][0].get("dipole_deriv"))
+
+
 # ---------------------------------------------------------------------------
 # TestSpectrumColumnsRealHeaders
 # ---------------------------------------------------------------------------
 
 # The headers above are simplified. Real ORCA writes the frequency unit as an
 # inline "(cm**-1)" token in the Raman header (and in the ORCA 4 IR header),
-# which has no counterpart column in the data rows. Counting it shifts every
-# lookup one place right: Raman activity would be read from the depolarization
+# which has no counterpart column in the data rows. Counting it shifted every
+# lookup one place right: Raman activity was read from the depolarization
 # column, and the ORCA 4 IR intensity from TX.
 
 _REAL_FREQ_HEADER = """\
@@ -346,6 +445,14 @@ class TestSpectrumColumnsRealHeaders(unittest.TestCase):
         self.assertAlmostEqual(p.data["frequencies"][6]["ir"], 66.66, places=2)
         self.assertAlmostEqual(p.data["frequencies"][7]["ir"], 11.11, places=2)
 
+    def test_unit_tokens_ignored_in_header_lookup(self):
+        p = OrcaParser()
+        p.lines = [
+            "RAMAN SPECTRUM",
+            " Mode    freq (cm**-1)   Activity   Depolarization",
+        ]
+        self.assertEqual(p._find_intensity_column(0, ("activity",), default=99), 2)
+
 
 # ---------------------------------------------------------------------------
 # TestParseChargesMayer
@@ -377,7 +484,6 @@ Mayer bond orders
 
 
 class TestParseChargesMayer(unittest.TestCase):
-
     def test_mayer_count(self):
         p = _parse_method(_MAYER_CONTENT, "parse_charges")
         self.assertEqual(len(p.data["charges"]["Mayer"]), 3)
@@ -400,11 +506,29 @@ class TestParseChargesMayer(unittest.TestCase):
         p = _parse_method(_MAYER_NO_VALENCY, "parse_charges")
         # No separate Mulliken block, so Mayer is also stored as Mulliken
         self.assertIn("Mulliken", p.data["charges"])
-        self.assertAlmostEqual(p.data["charges"]["Mulliken"][0]["charge"], -0.76543, places=4)
+        self.assertAlmostEqual(
+            p.data["charges"]["Mulliken"][0]["charge"], -0.76543, places=4
+        )
 
     def test_empty_content(self):
         p = _parse_method("", "parse_charges")
         self.assertNotIn("Mayer", p.data["charges"])
+
+    def test_a_truncated_row_does_not_take_out_the_others(self):
+        """QA is parts[4]; a >= 4 guard let a short row reach an IndexError
+        that the blanket handler swallowed, silently losing the row."""
+        content = (
+            "MAYER POPULATION ANALYSIS\n"
+            "---\n"
+            "ATOM    NA    ZA    QA\n"
+            "   0 C     6.0000  6.0000  -0.12345\n"
+            "   1 H     0.8765\n"
+            "   2 H     0.8765  1.0000   0.06172\n"
+            "Mayer bond orders\n"
+        )
+        p = _parse_method(content, "parse_charges")
+        idxs = [e["atom_idx"] for e in p.data["charges"]["Mayer"]]
+        self.assertEqual(idxs, [0, 2])
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +572,6 @@ Actual Energy
 
 
 class TestParseScanResultsTable(unittest.TestCase):
-
     def test_builds_steps_from_summary(self):
         p = _parse_method(_SCAN_RESULTS_CONTENT, "parse_scan_results_table")
         self.assertEqual(len(p.data["scan_steps"]), 3)
@@ -507,7 +630,6 @@ Image Dist.(Ang.)    E(Eh)   dE(kcal/mol)  max(|Fp|)  RMS(Fp)
 
 
 class TestParseTrajectoryNeb(unittest.TestCase):
-
     def test_neb_image_count(self):
         p = _parse_method(_NEB_PATH_SUMMARY, "parse_trajectory")
         neb = [s for s in p.data["scan_steps"] if s.get("type") == "neb_image"]
@@ -552,7 +674,6 @@ CARTESIAN COORDINATES (ANGSTROEM)
 
 
 class TestParseOptCycleConvergence(unittest.TestCase):
-
     def test_convergence_dict_populated(self):
         p = _parse_method(_OPT_CONVERGENCE, "parse_trajectory")
         step = p.data["scan_steps"][0]
@@ -587,7 +708,6 @@ CARTESIAN GRADIENT
 
 
 class TestParseGradientsMultipleBlocks(unittest.TestCase):
-
     def test_two_blocks_stored_in_all_gradients(self):
         p = _parse_method(_TWO_GRADIENT_BLOCKS, "parse_gradients")
         self.assertEqual(len(p.data["all_gradients"]), 2)

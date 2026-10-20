@@ -9,7 +9,7 @@ Covers:
     value whenever scaling coefficients change; only the Scaled column (col 1)
     is updated; the Unscaled column (col 2) stays fixed.
 
-PyQt6, pyvista, rdkit, numpy, and PIL are stubbed so the tests run headlessly.
+PySide6, pyvista, rdkit, numpy, and PIL are stubbed so the tests run headlessly.
 """
 
 import os
@@ -17,7 +17,7 @@ import sys
 import types
 import importlib.util
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -260,10 +260,10 @@ def _install_stubs():
         def setAlignment(self, *a):
             pass
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
-    existing_core = sys.modules.get("PyQt6.QtCore")
-    existing_gui = sys.modules.get("PyQt6.QtGui")
-    existing_pyqt6 = sys.modules.get("PyQt6")
+    sys.modules.get("PySide6.QtWidgets")
+    sys.modules.get("PySide6.QtCore")
+    sys.modules.get("PySide6.QtGui")
+    sys.modules.get("PySide6")
 
     _WIDGET_MOCKS = [
         "QVBoxLayout",
@@ -279,6 +279,7 @@ def _install_stubs():
         "QApplication",
         "QColorDialog",
         "QRadioButton",
+        "QTabWidget",
     ]
     _WIDGET_CLASSES = {
         "QDialog": _QDialog,
@@ -293,30 +294,30 @@ def _install_stubs():
         "QLabel": _QLabel,
     }
 
-    # Build and install new stubs, overriding any existing PyQt6 modules to avoid
+    # Build and install new stubs, overriding any existing PySide6 modules to avoid
     # constructing real widgets (which requires a QApplication and crashes headlessly).
-    _pyqt6 = types.ModuleType("PyQt6")
-    _core = types.ModuleType("PyQt6.QtCore")
+    _pyside6 = types.ModuleType("PySide6")
+    _core = types.ModuleType("PySide6.QtCore")
     _core.Qt = MagicMock()
     _core.QTimer = _QTimer
-    _widgets = types.ModuleType("PyQt6.QtWidgets")
+    _widgets = types.ModuleType("PySide6.QtWidgets")
     for name in _WIDGET_MOCKS:
         setattr(_widgets, name, MagicMock)
     for name, cls in _WIDGET_CLASSES.items():
         setattr(_widgets, name, cls)
-    _pyqt6.QtWidgets = _widgets
-    _pyqt6.QtCore = _core
-    _gui = types.ModuleType("PyQt6.QtGui")
+    _pyside6.QtWidgets = _widgets
+    _pyside6.QtCore = _core
+    _gui = types.ModuleType("PySide6.QtGui")
     _gui.QColor = _QColor
     _gui.QBrush = MagicMock
-    _pyqt6.QtGui = _gui
+    _pyside6.QtGui = _gui
 
     sys.modules.update(
         {
-            "PyQt6": _pyqt6,
-            "PyQt6.QtWidgets": _widgets,
-            "PyQt6.QtCore": _core,
-            "PyQt6.QtGui": _gui,
+            "PySide6": _pyside6,
+            "PySide6.QtWidgets": _widgets,
+            "PySide6.QtCore": _core,
+            "PySide6.QtGui": _gui,
         }
     )
 
@@ -329,11 +330,15 @@ def _install_stubs():
     _sw = types.ModuleType("orca_result_analyzer_rust.spectrum_widget")
     _sw.SpectrumWidget = MagicMock
 
-    # utils stub
+    # utils stub — notify() is pulled in from the real module (no Qt
+    # dependency) so its owner-chain resolution is genuinely exercised.
+    from orca_result_analyzer_rust.utils import notify as _real_notify
+
     _ut = types.ModuleType("orca_result_analyzer_rust.utils")
     _ut.get_default_export_path = MagicMock(return_value="")
     _ut.clear_atom_color_overrides = MagicMock()
     _ut.save_json_atomic = MagicMock()
+    _ut.notify = _real_notify
 
     # PIL stub — fallback only. This lands in the shared sys.modules for the
     # rest of the session, and matplotlib's Agg backend does
@@ -434,26 +439,41 @@ def _make_dialog(frequencies):
     dlg.custom_presets = {}
 
     # Spin boxes
-    dlg.spin_sf_a = sys.modules["PyQt6.QtWidgets"].QDoubleSpinBox()
+    dlg.spin_sf_a = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
     dlg.spin_sf_a._val = 1.0
-    dlg.spin_sf_b = sys.modules["PyQt6.QtWidgets"].QDoubleSpinBox()
+    dlg.spin_sf_b = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
     dlg.spin_sf_b._val = 0.0
 
     # Tree widget (real stub class)
-    dlg.tree = sys.modules["PyQt6.QtWidgets"].QTreeWidget()
+    dlg.tree = sys.modules["PySide6.QtWidgets"].QTreeWidget()
 
     # Manual displacement mocks
-    dlg.chk_manual_displ = sys.modules["PyQt6.QtWidgets"].QCheckBox()
-    dlg.slider_displ = sys.modules["PyQt6.QtWidgets"].QSlider()
-    dlg.lbl_displ_val = sys.modules["PyQt6.QtWidgets"].QLabel()
-    dlg.spin_amp = sys.modules["PyQt6.QtWidgets"].QDoubleSpinBox()
+    dlg.chk_manual_displ = sys.modules["PySide6.QtWidgets"].QCheckBox()
+    dlg.slider_displ = sys.modules["PySide6.QtWidgets"].QSlider()
+    dlg.lbl_displ_val = sys.modules["PySide6.QtWidgets"].QLabel()
+    dlg.spin_amp = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
     dlg.spin_amp._val = 1.0
 
     # Playback button mocks
-    dlg.btn_play = sys.modules["PyQt6.QtWidgets"].QPushButton()
-    dlg.btn_pause = sys.modules["PyQt6.QtWidgets"].QPushButton()
-    dlg.btn_stop = sys.modules["PyQt6.QtWidgets"].QPushButton()
-    dlg.btn_gif = sys.modules["PyQt6.QtWidgets"].QPushButton()
+    dlg.btn_play = sys.modules["PySide6.QtWidgets"].QPushButton()
+    dlg.btn_pause = sys.modules["PySide6.QtWidgets"].QPushButton()
+    dlg.btn_stop = sys.modules["PySide6.QtWidgets"].QPushButton()
+    dlg.btn_gif = sys.modules["PySide6.QtWidgets"].QPushButton()
+
+    # Dipole-change overlay (its own tab, its own settings)
+    dlg.dipole_color = "magenta"
+    dlg.dipole_actor = None
+    dlg.chk_dipole = sys.modules["PySide6.QtWidgets"].QCheckBox()
+    dlg.chk_dipole.setChecked(False)
+    dlg.lbl_dipole = sys.modules["PySide6.QtWidgets"].QLabel()
+    dlg.spin_dip_scale = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
+    dlg.spin_dip_scale._val = 20.0
+    dlg.spin_dip_res = sys.modules["PySide6.QtWidgets"].QSpinBox()
+    dlg.spin_dip_res._val = 20
+    dlg.spin_dip_alpha = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
+    dlg.spin_dip_alpha._val = 1.0
+    dlg.spin_vec_alpha = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
+    dlg.spin_vec_alpha._val = 1.0
 
     return dlg
 
@@ -677,9 +697,9 @@ class TestManualDisplacement(unittest.TestCase):
 
         self.dlg.mw.current_mol = self.mock_mol
         self.dlg.context = MagicMock()
-        self.dlg.chk_vector = sys.modules["PyQt6.QtWidgets"].QCheckBox()
+        self.dlg.chk_vector = sys.modules["PySide6.QtWidgets"].QCheckBox()
         self.dlg.chk_vector.setChecked(False)
-        self.dlg.spin_vec_scale = sys.modules["PyQt6.QtWidgets"].QDoubleSpinBox()
+        self.dlg.spin_vec_scale = sys.modules["PySide6.QtWidgets"].QDoubleSpinBox()
         self.dlg.spin_vec_scale._val = 2.0
 
     def test_toggle_manual_displacement(self):
@@ -745,6 +765,139 @@ class TestManualDisplacement(unittest.TestCase):
         # 3. Assert coordinates were reset to base coordinates
         self.assertAlmostEqual(self.positions_set[0][0], 1.0, places=4)
         self.assertAlmostEqual(self.positions_set[1][1], 5.0, places=4)
+
+
+class _FakePolyData:
+    """Stands in for pv.PolyData.
+
+    The module-level stub is `pv.PolyData = MagicMock`, which treats its first
+    positional argument as a *spec* -- so the resulting mock rejects
+    `point_data` and the drawing code fails before it reaches add_mesh. This
+    keeps the two attributes the code actually uses.
+    """
+
+    last = None
+
+    def __init__(self, points):
+        self.points = points
+        self.point_data = {}
+        self.glyph_kwargs = None
+        _FakePolyData.last = self
+
+    def glyph(self, **kwargs):
+        self.glyph_kwargs = kwargs
+        return self
+
+
+class TestDipoleChangeVector(unittest.TestCase):
+    """The dipole-change arrow: ORCA's per-mode transition dipole derivative."""
+
+    def setUp(self):
+        self.freqs = [
+            {"freq": 1200.0, "ir": 14.83, "dipole_deriv": (0.04, -0.03, 0.0)},
+            {"freq": 1800.0, "ir": 0.0},  # no derivative reported for this one
+        ]
+        self.dlg = _make_dialog(self.freqs)
+        self.dlg.current_mode_idx = 0
+        self.dlg.base_coords = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]
+        patcher = patch.object(_fa_mod.pv, "PolyData", _FakePolyData)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        _FakePolyData.last = None
+
+    def _drawn(self):
+        return self.dlg.mw.plotter.add_mesh.called
+
+    def test_nothing_is_drawn_while_the_box_is_unchecked(self):
+        self.dlg.chk_dipole.setChecked(False)
+        self.dlg.update_dipole_view()
+        self.assertFalse(self._drawn())
+        self.assertIsNone(self.dlg.dipole_actor)
+
+    def test_checking_the_box_draws_one_arrow(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        self.assertTrue(self._drawn())
+        self.assertIsNotNone(self.dlg.dipole_actor)
+
+    def test_the_arrow_is_named_apart_from_the_mode_vectors(self):
+        """Sharing the mode vectors' actor name would make each overlay
+        silently remove the other when both are shown."""
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        self.assertEqual(
+            self.dlg.mw.plotter.add_mesh.call_args.kwargs["name"], "vib_dipole"
+        )
+
+    def test_the_arrow_uses_the_dipole_tabs_own_colour_and_alpha(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.dipole_color = "#123456"
+        self.dlg.spin_dip_alpha._val = 0.4
+        self.dlg.spin_vec_alpha._val = 1.0  # the other tab must not be consulted
+        self.dlg.update_dipole_view()
+        kwargs = self.dlg.mw.plotter.add_mesh.call_args.kwargs
+        self.assertEqual(kwargs["color"], "#123456")
+        self.assertAlmostEqual(kwargs["opacity"], 0.4)
+
+    def test_the_magnitude_is_reported_in_atomic_units(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        self.assertIn("0.0500", self.dlg.lbl_dipole.text())  # |(0.04,-0.03,0)| = 0.05
+
+    def test_a_mode_without_a_derivative_says_so_instead_of_drawing(self):
+        """The six translations/rotations sit outside the IR table, and
+        pre-5.x outputs omit the columns entirely."""
+        self.dlg.current_mode_idx = 1
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        self.assertFalse(self._drawn())
+        self.assertIn("not reported", self.dlg.lbl_dipole.text())
+
+    def test_redrawing_removes_the_previous_arrow(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        first = self.dlg.dipole_actor
+        self.dlg.update_dipole_view()
+        self.dlg.mw.plotter.remove_actor.assert_any_call(first)
+
+    def test_unchecking_clears_the_arrow_and_the_label(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        drawn = self.dlg.dipole_actor
+        self.dlg.chk_dipole.setChecked(False)
+        self.dlg.update_dipole_view()
+        self.dlg.mw.plotter.remove_actor.assert_any_call(drawn)
+        self.assertIsNone(self.dlg.dipole_actor)
+        self.assertEqual(self.dlg.lbl_dipole.text(), "")
+
+    def test_a_stronger_mode_gets_a_longer_arrow(self):
+        """Length goes as sqrt(|dmu/dQ|), so a weak mode stays visible."""
+        scales = {}
+        for tag, deriv in (("weak", (0.01, 0.0, 0.0)), ("strong", (0.09, 0.0, 0.0))):
+            dlg = _make_dialog([{"freq": 1000.0, "dipole_deriv": deriv}])
+            dlg.current_mode_idx = 0
+            dlg.base_coords = [(0.0, 0.0, 0.0)]
+            dlg.chk_dipole.setChecked(True)
+            dlg.update_dipole_view()
+            scales[tag] = _FakePolyData.last.glyph_kwargs["factor"]
+        # 0.09 / 0.01 = 9 in magnitude, so 3 in arrow length.
+        self.assertGreater(scales["strong"], scales["weak"])
+        self.assertAlmostEqual(scales["strong"] / scales["weak"], 3.0, places=4)
+
+    def test_the_arrow_points_along_the_reported_derivative(self):
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        direction = _FakePolyData.last.point_data["vectors"][0]
+        self.assertAlmostEqual(float(direction[0]), 0.8, places=6)
+        self.assertAlmostEqual(float(direction[1]), -0.6, places=6)
+        self.assertAlmostEqual(float(direction[2]), 0.0, places=6)
+
+    def test_the_arrow_starts_from_the_molecular_centroid(self):
+        """It is one molecule-wide quantity, not a per-atom one."""
+        self.dlg.chk_dipole.setChecked(True)
+        self.dlg.update_dipole_view()
+        origin = _FakePolyData.last.points[0]
+        self.assertAlmostEqual(float(origin[0]), 1.0, places=6)  # midpoint of 0 and 2
 
 
 if __name__ == "__main__":

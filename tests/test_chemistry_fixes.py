@@ -93,51 +93,25 @@ class TestVibrationalIntensities(unittest.TestCase):
         for f in freqs[:6]:
             self.assertEqual(f["ir"], 0.0)
 
-    # The pure-Python plugin tests _find_intensity_column directly. That is a
-    # Python-side private method; the Rust engine keeps the equivalent inside
-    # the crate and it is not part of the drop-in OrcaParser surface. The same
-    # behaviour is asserted end-to-end here and, against real ORCA 4/5/6
-    # headers, in test_parser_extended.TestSpectrumColumnsRealHeaders.
-
     def test_intensity_column_is_read_from_the_header(self):
         from orca_result_analyzer_rust.parser import OrcaParser
 
-        p = OrcaParser()
-        p.load_from_memory(
-            "VIBRATIONAL FREQUENCIES\n"
-            "-----------------------\n"
-            "\n"
-            "   0:      1623.45 cm**-1\n"
-            "\n"
-            "IR SPECTRUM\n"
-            "-----------\n"
-            "\n"
-            " Mode   freq       eps      Int      T**2        TX\n"
-            "       cm**-1   L/(mol*cm) km/mol    a.u.\n"
-            "-------------------------------------------------\n"
-            "    0:   1623.45   1.9999   66.66   0.002999   -0.05\n"
-        )
-        self.assertAlmostEqual(p.data["frequencies"][0]["ir"], 66.66, places=2)
+        parser = OrcaParser()
+        parser.lines = [
+            "IR SPECTRUM",
+            "-----------",
+            "",
+            " Mode   freq       eps      Int      T**2        TX",
+            "       cm**-1   L/(mol*cm) km/mol    a.u.",
+        ]
+        self.assertEqual(parser._find_intensity_column(0, ("int", "t**2"), 99), 3)
 
     def test_missing_header_falls_back_to_the_default_column(self):
-        """No recognisable header: column 3 is still the ORCA 5/6 default."""
         from orca_result_analyzer_rust.parser import OrcaParser
 
-        p = OrcaParser()
-        p.load_from_memory(
-            "VIBRATIONAL FREQUENCIES\n"
-            "-----------------------\n"
-            "\n"
-            "   0:      1623.45 cm**-1\n"
-            "\n"
-            "IR SPECTRUM\n"
-            "-----------\n"
-            "\n"
-            "\n"
-            "\n"
-            "    0:   1623.45   1.9999   66.66   0.002999   -0.05\n"
-        )
-        self.assertAlmostEqual(p.data["frequencies"][0]["ir"], 66.66, places=2)
+        parser = OrcaParser()
+        parser.lines = ["IR SPECTRUM", "-----------", "", "", ""]
+        self.assertEqual(parser._find_intensity_column(0, ("int",), 3), 3)
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 tests/test_bond_analysis.py
 Unit tests for the Bond Analysis panel's 3D-highlight logic and VDW scaling.
 
-PyQt6 and pyvista are stubbed so the module imports headlessly; the dialog's
+PySide6 and pyvista are stubbed so the module imports headlessly; the dialog's
 Qt constructor is bypassed (object.__new__) to exercise the pure highlight
 logic with a lightweight fake host (parser data + plotter).
 """
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
-# Stub PyQt6 + pyvista before importing bond_analysis
+# Stub PySide6 + pyvista before importing bond_analysis
 # ---------------------------------------------------------------------------
 
 
@@ -38,7 +38,7 @@ _PV_STUB = _build_pv_stub()
 
 
 def _install_stubs():
-    for name in ["PyQt6", "PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui"]:
+    for name in ["PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui"]:
         sys.modules.setdefault(name, types.ModuleType(name))
 
     class _Base:
@@ -52,7 +52,7 @@ def _install_stubs():
         def __getattr__(self, n):
             return MagicMock()
 
-    qtw = sys.modules["PyQt6.QtWidgets"]
+    qtw = sys.modules["PySide6.QtWidgets"]
     for cls in [
         "QDialog",
         "QVBoxLayout",
@@ -68,8 +68,8 @@ def _install_stubs():
     ]:
         setattr(qtw, cls, type(cls, (_Base,), {}))
     qtw.QApplication = MagicMock()
-    sys.modules["PyQt6.QtCore"].Qt = MagicMock()
-    sys.modules["PyQt6.QtGui"].QKeySequence = MagicMock()
+    sys.modules["PySide6.QtCore"].Qt = MagicMock()
+    sys.modules["PySide6.QtGui"].QKeySequence = MagicMock()
     sys.modules["pyvista"] = _PV_STUB
 
 

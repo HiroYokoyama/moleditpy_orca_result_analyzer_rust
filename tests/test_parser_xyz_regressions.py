@@ -15,22 +15,14 @@ parser.py imports only stdlib — OrcaParser is loaded directly without stubs.
 
 import os
 import sys
-import importlib.util
 import unittest
 
-_PARSER_SRC = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "orca_result_analyzer_rust", "parser.py")
-)
+sys.path.insert(0, os.path.dirname(__file__))
+from _parser_loader import load_standalone_parser  # noqa: E402
 
 
 def _load_parser():
-    spec = importlib.util.spec_from_file_location(
-        "orca_parser_xyz_regression", _PARSER_SRC
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["orca_parser_xyz_regression"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_standalone_parser("orca_parser_xyz_regression")
 
 
 OrcaParser = _load_parser().OrcaParser
@@ -40,14 +32,42 @@ def _frame(comment, atom_lines=("O 0.0 0.0 0.11779", "H 0.0 0.75545 -0.47116")):
     return "\n".join([str(len(atom_lines)), comment, *atom_lines]) + "\n"
 
 
+class TestXYZFrameValidation(unittest.TestCase):
+    def test_invalid_counts_cannot_rewind_the_parser(self):
+        class BoundedLines(list):
+            reads = 0
+
+            def __getitem__(self, index):
+                self.reads += 1
+                if self.reads > 100:
+                    raise AssertionError("XYZ parser did not advance")
+                return super().__getitem__(index)
+
+        class BoundedText(str):
+            def splitlines(self, keepends=False):
+                return BoundedLines(super().splitlines(keepends))
+
+        content = BoundedText("-2\nTS\n-1\nCI\n0\nCI\n" + _frame("E -76.1"))
+        steps = OrcaParser().parse_xyz_content(content)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["atoms"], ["O", "H"])
+
+    def test_scientific_notation_in_labels(self):
+        steps = OrcaParser().parse_xyz_content(_frame("Energy: -1.23e+02 Dist 1e-2"))
+        self.assertAlmostEqual(steps[0]["energy"], -123.0)
+        self.assertAlmostEqual(steps[0]["scan_coord"], 0.01)
+
+    def test_scientific_notation_in_fallback_energy(self):
+        steps = OrcaParser().parse_xyz_content(_frame("Frame 1 -1.23E+02"))
+        self.assertAlmostEqual(steps[0]["energy"], -123.0)
+
+
 class TestEnergyLabelWordBoundary(unittest.TestCase):
     """Bug 1: bare-'E' alternative must not match the tail of another word."""
 
     def test_coordinate_before_energy_label(self):
         # Old behavior: 'coordinatE 1.2' matched first -> energy = 1.2
-        steps = OrcaParser().parse_xyz_content(
-            _frame("Coordinate 1.2 Energy -76.400")
-        )
+        steps = OrcaParser().parse_xyz_content(_frame("Coordinate 1.2 Energy -76.400"))
         self.assertAlmostEqual(steps[0]["energy"], -76.400, places=3)
 
     def test_word_ending_in_e_before_number_falls_back_to_last_float(self):
@@ -118,9 +138,9 @@ class TestMalformedCoordinateLine(unittest.TestCase):
         self.assertEqual(len(steps[0]["coords"]), 2)
 
     def test_bad_frame_does_not_kill_later_frames(self):
-        content = _frame(
-            "E -76.1", atom_lines=("O 0.0 0.0 0.1", "H x y z")
-        ) + _frame("E -76.2")
+        content = _frame("E -76.1", atom_lines=("O 0.0 0.0 0.1", "H x y z")) + _frame(
+            "E -76.2"
+        )
         steps = OrcaParser().parse_xyz_content(content)
         self.assertEqual(len(steps), 2)
         self.assertAlmostEqual(steps[1]["energy"], -76.2, places=3)

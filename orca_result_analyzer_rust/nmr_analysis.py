@@ -1,9 +1,9 @@
-import hashlib
+"""NMR dialog: shielding/coupling tables, reference calibration and the spectrum tab."""
+
 import os
 import re
-import json
 import logging
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -14,63 +14,38 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QPushButton,
-    QApplication,
     QGroupBox,
     QMessageBox,
-    QFileDialog,
     QCheckBox,
     QButtonGroup,
     QAbstractItemView,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer
-import pyvista as pv
-import numpy as np
-from .utils import get_default_export_path, save_json_atomic
+from PySide6.QtCore import Qt, QTimer
+from .utils import notify
+from .settings import load_section, save_section
 
 try:
     import nmrsim
-    from nmrsim import Multiplet, Spectrum
 except ImportError as e:
     logging.warning("NMR: nmrsim not available — multiplet simulation disabled (%s)", e)
     nmrsim = None
-    Multiplet = None
-    Spectrum = None
-
-# Import RDKit for VDW radii calculation
-try:
-    from rdkit import Chem
-
-    _pt = Chem.GetPeriodicTable()
-    # Base VDW radii (scaled by 0.3 as in moledit core)
-    VDW_RADII = {_pt.GetElementSymbol(i): _pt.GetRvdw(i) * 0.3 for i in range(1, 119)}
-except ImportError:
-    VDW_RADII = {"H": 1.2 * 0.3, "C": 1.7 * 0.3, "N": 1.55 * 0.3, "O": 1.52 * 0.3}
 
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg as FigureCanvas,
     NavigationToolbar2QT,
 )
 from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
 from .nmr_custom_ref_dialog import CustomReferenceDialog
+from .nmr_merge import _NMRMergeMixin
+from .nmr_plot import _NMRPlotMixin
+from .nmr_export import _NMRExportMixin
 from . import PLUGIN_VERSION
 
-# Built-in shielding references, shared by __init__ and save_settings (which
-# subtracts them to work out which entries the user added). They were once
-# duplicated verbatim in both places, so editing one silently reclassified a
-# built-in as a custom reference.
-#
-# Shifts are δ = δ_ref + (σ_ref − σ_sample), so for one nucleus every entry
-# must satisfy the same δ_ref + σ_ref: that sum IS the absolute shielding of
-# the δ=0 point, and the alternative reference compounds are just different
-# parameterizations of it. The values below are anchored on TMS (1H, 13C) and
-# CH3NO2 (15N) and made exactly consistent with it.
-#
-# These are absolute shieldings and therefore method-dependent. They are
-# reasonable for a common GIAO/DFT setup, but for quantitative work compute
-# the reference at the same level of theory as the sample and enter it
-# through "Custom".
+# Shared by __init__ and save_settings, which subtracts these to find the
+# user's own entries. Per nucleus every entry must share one δ_ref + σ_ref:
+# that sum is the absolute shielding at δ=0. Method-dependent, so quantitative
+# work wants a reference computed at the sample's level of theory via "Custom".
 DEFAULT_REFERENCE_STANDARDS = {
     "1H": {
         "No Reference": {"delta_ref": 0.0, "sigma_ref": 0.0},
@@ -100,8 +75,11 @@ DEFAULT_REFERENCE_STANDARDS = {
 }
 
 
-class NMRDialog(QDialog):
+class NMRDialog(QDialog, _NMRMergeMixin, _NMRPlotMixin, _NMRExportMixin):
     """Enhanced NMR Chemical Shielding Dialog with Spectrum"""
+
+    # pylint: disable=attribute-defined-outside-init
+    # Qt/PyVista pattern: label/actor/state attrs are created lazily, not in __init__.
 
     # Class-level constants for Nucleus Mapping and Physics
     ISOTOPE_MAP = {
@@ -327,150 +305,6 @@ class NMRDialog(QDialog):
         self._nmr_sphere_actors = []
         self._nmr_label_names = []  # Explicitly track label names for removal
 
-    @staticmethod
-    def _merged_peaks_path(file_path, data):
-        """Path of the merged-peaks JSON for this result.
-
-        Without a file path the old code used one shared fallback file, so
-        merges saved for one molecule silently applied to (and were
-        overwritten by) every other pathless result. Key the fallback by a
-        fingerprint of the shielding data instead.
-        """
-        if file_path:
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            return os.path.join(
-                os.path.dirname(file_path), f"{base_name}-nmr_peak_info.json"
-            )
-        payload = json.dumps(
-            [
-                [d.get("atom_idx"), d.get("atom_sym"), d.get("shielding")]
-                for d in (data or [])
-            ],
-            sort_keys=True,
-        )
-        fingerprint = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
-        return os.path.join(
-            os.path.dirname(__file__), f"nmr_merged_peaks-{fingerprint}.json"
-        )
-
-    def _check_external_selection(self):
-        """Poll main window for 3D selection changes"""
-        if not hasattr(self.parent_dlg, "mw"):
-            return
-
-        mw = self.parent_dlg.mw
-
-        # 0. Check if Selection Mode is active (Optimization: Don't hijack selection if user is doing something else)
-        # Assuming mw has a 'current_mode' or we check if 'SelectionTool' is active if that structure exists.
-        # Fallback: If mw has 'selection_enabled' flag.
-        # 0. Check if Selection Mode is active
-        # We removed the mw.scene.mode check because it refers to the 2D editor mode.
-        # 3D selection should be allowed unless we are in a specific conflicting mode like Measurement.
-
-        if (
-            getattr(mw.edit_3d_manager, "measurement_mode", False)
-            if hasattr(mw, "edit_3d_manager")
-            else False
-        ):
-            # Measurement mode uses a different selection list
-            pass
-
-        indices = set()
-
-        e3d = getattr(mw, "edit_3d_manager", None)
-
-        # Check standard 3D selection
-        if e3d and e3d.selected_atoms_3d:
-            indices.update(e3d.selected_atoms_3d)
-
-        # Check measurement selection
-        if e3d and e3d.selected_atoms_for_measurement:
-            for item in e3d.selected_atoms_for_measurement:
-                if isinstance(item, int):
-                    indices.add(item)
-
-        # 1. State Tracking for Stability
-        # Compare current 3D selection with what we LAST knew about/set.
-        # If they are identical, NO CHANGE has happened, so we do nothing.
-        # This prevents the "Echo" loop where we clear the selection (setting it to empty)
-        # and then this poller sees "Empty" vs "My Internal Selection" and clears the graph.
-
-        current_mw_selection_frozen = frozenset(indices)
-
-        # Initialize tracker if missing
-        if getattr(self, "_last_synced_mw_selection", None) is None:
-            self._last_synced_mw_selection = frozenset()
-
-        # If the 3D selection HAS NOT CHANGED from what we last saw/set, STOP.
-        if current_mw_selection_frozen == self._last_synced_mw_selection:
-            return
-
-        # Update our tracker to the new state
-        self._last_synced_mw_selection = current_mw_selection_frozen
-
-        # Calculate what the NMR selection SHOULD be based on the current 3D selection
-        # Note: We use the "Any Member" rule for selecting, but by not expanding the 3D set,
-        # unselection of the specific clicked atom correctly clears the indices.
-        new_peak_selection = self._calculate_peak_selection_from_atoms(indices)
-
-        # Only update if the peak selection itself has changed
-        if new_peak_selection != self.selected_peak_indices:
-            # If 3D selection is empty, force clear
-            if not indices:
-                self.clear_peak_selection()
-            else:
-                self.selected_peak_indices = new_peak_selection
-                self.highlight_selected_peaks()
-                # Update visual labels and spheres (Yellow),
-                # but tell it NOT to sync back to the main window's selection set (Green).
-                self.update_selected_labels(is_external_sync=True)
-
-    def _calculate_peak_selection_from_atoms(self, target_atoms):
-        """Helper to determine which peaks should be selected based on atom set"""
-        if not getattr(self, "peaks_metadata", None):
-            return set()
-
-        new_selection = set()
-        target_atoms = {int(i) for i in target_atoms}
-
-        for peak_idx, metadata in enumerate(self.peaks_metadata):
-            # metadata: (shift, intensity, is_merged, atom_indices)
-            _, _, _, peak_atoms = metadata
-            peak_atoms_set = {int(i) for i in peak_atoms}
-
-            # Selection Rule: A peak is selected if ANY of its atoms are in the 3D selection set.
-            # This is stable and prevents the "flicker" caused by switching between ANY and SUBSET.
-            if not peak_atoms_set.isdisjoint(target_atoms):
-                new_selection.add(peak_idx)
-        return new_selection
-
-    def _remap_selection_to_new_peaks(self, old_metadata):
-        """Re-derive selected_peak_indices after peaks_metadata is rebuilt.
-
-        The selection stores positions into peaks_metadata; a rebuild
-        (nucleus filter, reference change, merge/unmerge) reorders that
-        list, so the same numbers would silently point at different peaks
-        — and a later Merge/Unmerge would then destroy the wrong groups.
-        """
-        if not self.selected_peak_indices:
-            return
-        selected_atoms = set()
-        for idx in self.selected_peak_indices:
-            if isinstance(idx, int) and 0 <= idx < len(old_metadata):
-                selected_atoms.update(old_metadata[idx][3])
-        self.selected_peak_indices = self._calculate_peak_selection_from_atoms(
-            selected_atoms
-        )
-
-    def select_peaks_by_atom_indices(self, atom_indices):
-        """Deprecated/Legacy: Now uses _check_external_selection logic directly"""
-        # Kept for potential internal calls, but redirected to robust logic
-        new_peaks = self._calculate_peak_selection_from_atoms(atom_indices)
-        if new_peaks != self.selected_peak_indices:
-            self.selected_peak_indices = new_peaks
-            self.highlight_selected_peaks()
-            self.update_selected_labels()
-
     def get_nucleus_key(self, atom_sym):
         """Map atom symbol to nucleus key for reference standards"""
         # Clean the input symbol (remove whitespace, numbers if accidentally passed)
@@ -482,11 +316,8 @@ class NMRDialog(QDialog):
     def load_settings(self):
         """Load NMR settings from JSON"""
         if os.path.exists(self.settings_file):
+            nmr_settings = load_section(self.settings_file, "nmr_settings")
             try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-
-                nmr_settings = settings.get("nmr_settings", {})
                 self.linewidth = nmr_settings.get("spectrum_linewidth", 1.0)
                 self.peak_intensity = nmr_settings.get("peak_intensity", 1.0)
 
@@ -499,199 +330,11 @@ class NMRDialog(QDialog):
                         self.reference_standards[nucleus] = {}
                     for ref_name, ref_val in refs.items():
                         self.reference_standards[nucleus][ref_name] = ref_val
-            except Exception as e:
+            except AttributeError as e:
                 logging.warning("Error loading NMR settings: %s", e)
-
-    def merge_selected_peaks(self):
-        """Merge selected peaks into a single entry with isotope validation"""
-        if len(self.selected_peak_indices) < 2:
-            QMessageBox.warning(
-                self, "Invalid Selection", "Please select at least 2 peaks to merge."
-            )
-            return
-
-        selected_indices = []
-        atom_symbols = set()
-
-        # 1. 選択されたピークから原子インデックスと元素記号を取得
-        if getattr(self, "peaks_metadata", None) is not None and self.peaks_metadata:
-            for peak_idx in self.selected_peak_indices:
-                if peak_idx < len(self.peaks_metadata):
-                    _, _, _, atom_indices = self.peaks_metadata[peak_idx]
-                    selected_indices.extend(atom_indices)
-
-                    # 核種のチェック用に元素記号を収集
-                    for idx in atom_indices:
-                        item = next(
-                            (d for d in self.data if d.get("atom_idx", None) == idx),
-                            None,
-                        )
-                        if item:
-                            # A missing symbol must not count as a distinct
-                            # nucleus (and None would crash the ', '.join in
-                            # the mixed-nuclei error message below).
-                            sym = item.get("atom_sym", None)
-                            if sym:
-                                atom_symbols.add(sym)
-
-        # 2. 【物理バリデーション】異なる元素が混ざっていないかチェック
-        if len(atom_symbols) > 1:
-            QMessageBox.critical(
-                self,
-                "Physical Inconsistency",
-                f"Cannot merge different nuclei: {', '.join(atom_symbols)}. "
-                "NMR peaks can only be merged for the same isotope.",
-            )
-            return
-
-        # 3. 重複排除とソート
-        selected_indices = sorted(list(set(selected_indices)))
-
-        # Stale peak metadata can resolve the selection to zero atoms;
-        # merging then would store an empty group (and a stale selection
-        # must never reach the conflict-replace step below).
-        if not selected_indices:
-            QMessageBox.warning(
-                self,
-                "Invalid Selection",
-                "Could not resolve the selected peaks to atoms. "
-                "Please re-select the peaks and try again.",
-            )
-            return
-
-        # 4. 既存のマージグループとの競合チェック
-        new_merged_peaks = []
-        conflict_found = False
-        for group in self.merged_peaks:
-            if any(idx in group["indices"] for idx in selected_indices):
-                conflict_found = True
-                continue  # 競合する古いグループはスキップ（後でまとめて追加するため）
-            new_merged_peaks.append(group)
-
-        if conflict_found:
-            reply = QMessageBox.question(
-                self,
-                "Merge Conflict",
-                "Some selected atoms are already part of another group. Replace existing merge?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.No:
-                return
-
-        # 5. 新しいグループの追加（保存は Save Merges ボタン / クローズ時の確認で）
-        new_merged_peaks.append({"indices": selected_indices})
-        self.merged_peaks = new_merged_peaks
-        self._mark_merges_dirty()
-
-        # 6. UIのクリーンアップ
-        self.clear_peak_selection()
-        if self.parent_dlg and self.parent_dlg.context:
-            self.parent_dlg.context.show_status_message(
-                f"Merged {len(selected_indices)} atoms into one peak (not saved yet).",
-                5000,
-            )
-
-        self.recalc()
-
-    def unmerge_selected_peaks(self):
-        """Separate previously merged peaks back into individuals"""
-        if not self.selected_peak_indices:
-            return
-
-        metadata = getattr(self, "peaks_metadata", None) or []
-        groups_to_remove = []
-        for peak_idx in self.selected_peak_indices:
-            if peak_idx < len(metadata):
-                _, _, is_merged, atom_indices = metadata[peak_idx]
-                if is_merged:
-                    # Find which group in self.merged_peaks contains these indices
-                    # Since groups are unique per atom, we can just match any index
-                    for group in self.merged_peaks:
-                        if all(idx in group["indices"] for idx in atom_indices) and len(
-                            group["indices"]
-                        ) == len(atom_indices):
-                            if group not in groups_to_remove:
-                                groups_to_remove.append(group)
-                            break
-
-        if not groups_to_remove:
-            return
-
-        for group in groups_to_remove:
-            self.merged_peaks.remove(group)
-
-        self._mark_merges_dirty()
-        self.clear_peak_selection()
-        self.recalc()
-
-    def _mark_merges_dirty(self):
-        """Flag in-memory merge changes as unsaved and enable the save button."""
-        self._merged_dirty = True
-        btn = getattr(self, "btn_save_merge", None)
-        if btn:
-            btn.setEnabled(True)
-
-    def save_merges_clicked(self):
-        """Persist merged peak groups to disk (explicit user action)."""
-        self.save_merged_peaks()
-        self._merged_dirty = False
-        btn = getattr(self, "btn_save_merge", None)
-        if btn:
-            btn.setEnabled(False)
-        if self.parent_dlg and self.parent_dlg.context:
-            self.parent_dlg.context.show_status_message("Merged peaks saved.", 3000)
-
-    def save_merged_peaks(self):
-        """Save merged peaks to JSON file"""
-        try:
-            save_json_atomic(self.merged_peaks_file, self.merged_peaks)
-        except Exception as e:
-            logging.warning("Error saving merged peaks: %s", e)
-
-    def load_merged_peaks(self):
-        """Load merged peaks from JSON file"""
-        self.merged_peaks = []
-        if not os.path.exists(self.merged_peaks_file):
-            return
-        try:
-            with open(self.merged_peaks_file, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as e:
-            logging.warning("Error loading merged peaks: %s", e)
-            # Move the unreadable file aside instead of leaving it in the
-            # save path: the next save would otherwise silently replace
-            # every previously saved merge with the empty list.
-            try:
-                os.replace(self.merged_peaks_file, self.merged_peaks_file + ".corrupt")
-            except OSError:
-                pass
-            return
-        if not isinstance(raw, list):
-            logging.warning(
-                "Ignoring merged peaks file with unexpected structure: %s",
-                self.merged_peaks_file,
-            )
-            return
-        for group in raw:
-            indices = group.get("indices") if isinstance(group, dict) else None
-            if (
-                isinstance(indices, list)
-                and indices
-                and all(isinstance(i, int) and not isinstance(i, bool) for i in indices)
-            ):
-                self.merged_peaks.append(group)
 
     def save_settings(self):
         """Save NMR settings to JSON"""
-        all_settings = {}
-        # 既存の設定を読み込む（MO設定などを消さないため）
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    all_settings = json.load(f)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-
         # Extract custom references only (non-default)
         default_standards = DEFAULT_REFERENCE_STANDARDS
 
@@ -716,23 +359,14 @@ class NMRDialog(QDialog):
             "spectrum_linewidth": self.linewidth,
             "peak_intensity": self.peak_intensity,
             "last_reference": self.last_ref_name,
-            "custom_references": custom_refs,  # 既存の変数
+            "custom_references": custom_refs,
         }
 
-        # 全体設定の 'nmr_settings' キーだけを更新
-        all_settings["nmr_settings"] = current_nmr_settings
-
-        try:
-            save_json_atomic(self.settings_file, all_settings)
-        except Exception as e:
-            logging.warning("Error saving NMR settings: %s", e)
-
-    def reset_zoom(self, event):
-        """Reset plot zoom on double click"""
-        if event.dblclick:
-            self.toolbar.home()
+        # Update only the 'nmr_settings' key of the whole settings file
+        save_section(self.settings_file, "nmr_settings", current_nmr_settings)
 
     def setup_ui(self):
+        """Build the dialog's layout: filters, tables, plot tab and action buttons."""
         main_layout = QVBoxLayout(self)
 
         # 1. Reference & Element Filter Row
@@ -1129,16 +763,16 @@ class NMRDialog(QDialog):
 
         target_ref = None
 
-        # 直前の選択がある、かつ "No Reference" ではない（Allモード由来ではない）場合
+        # A previous selection that did not come from "All" mode
         if current_ref and current_ref in items and current_ref != "No Reference":
             target_ref = current_ref
-        # 記憶していたリファレンスがある場合
+        # Otherwise the remembered reference
         elif self.last_ref_name and self.last_ref_name in items:
             target_ref = self.last_ref_name
-        # デフォルト(TMS)
+        # Otherwise the default, TMS
         elif "TMS" in items:
             target_ref = "TMS"
-        # それ以外
+        # Otherwise whatever is first
         elif items:
             target_ref = items[0]
 
@@ -1146,7 +780,7 @@ class NMRDialog(QDialog):
             self.combo_ref.setCurrentText(target_ref)
             ref_data = refs.get(target_ref, {"delta_ref": 0.0, "sigma_ref": 0.0})
         else:
-            self.combo_ref.setCurrentText("Custom")  # または No Reference
+            self.combo_ref.setCurrentText("Custom")
             ref_data = {"delta_ref": 0.0, "sigma_ref": 0.0}
 
         # Update internal values
@@ -1290,13 +924,11 @@ class NMRDialog(QDialog):
         # Now that we switched inputs (if we were in All), this should work
         self.combo_ref.setCurrentText(ref_name)
 
-        if self.parent_dlg and self.parent_dlg.context:
-            self.parent_dlg.context.show_status_message(
-                f"Added reference '{ref_name}' for {len(nucleus_data)} nucleus/nuclei.",
-                5000,
-            )
-        else:
-            logging.info("Reference '%s' added.", ref_name)
+        notify(
+            self,
+            f"Added reference '{ref_name}' for {len(nucleus_data)} nucleus/nuclei.",
+            5000,
+        )
 
     def delete_custom_reference(self):
         """Delete currently selected custom reference"""
@@ -1313,22 +945,11 @@ class NMRDialog(QDialog):
         if not current_ref:
             return
 
-        # Check if it is a built-in standard
-        default_standards = {
-            "1H": ["TMS", "CDCl3", "DMSO-d6"],
-            "13C": ["TMS", "CDCl3", "DMSO-d6"],
-            "15N": ["CH3NO2", "NH3"],
-            "31P": ["H3PO4 (85%)"],
-            "19F": ["CFCl3"],
-        }
-
-        # Also check hardcoded defaults in save_settings to be safe
-        is_default = False
-        if (
-            current_nucleus in default_standards
-            and current_ref in default_standards[current_nucleus]
-        ):
-            is_default = True
+        # Built-ins come from the one shared table; a second hand-kept copy
+        # here could drift out of sync with it.
+        is_default = current_ref in DEFAULT_REFERENCE_STANDARDS.get(
+            current_nucleus, {}
+        )
 
         # Prevent deletion of "Custom" placeholder AND "No Reference"
         if current_ref in ["Custom", "No Reference"]:
@@ -1357,12 +978,8 @@ class NMRDialog(QDialog):
                     del self.reference_standards[current_nucleus][current_ref]
                     self.save_settings()
                     self.update_reference_combo()
-                    if self.parent_dlg and self.parent_dlg.context:
-                        self.parent_dlg.context.show_status_message(
-                            f"Reference '{current_ref}' removed.", 5000
-                        )
-                    else:
-                        logging.info("Reference '%s' removed.", current_ref)
+                    self.recalc()
+                    notify(self, f"Reference '{current_ref}' removed.", 5000)
                 else:
                     # Should not happen if UI is consistent
                     QMessageBox.warning(
@@ -1383,10 +1000,10 @@ class NMRDialog(QDialog):
 
         if getattr(self, "chk_auto_x", None) is not None:
             self.chk_auto_x.blockSignals(True)
-            self.chk_auto_x.setChecked(False)  # ここで強制解除
+            self.chk_auto_x.setChecked(False)
             self.chk_auto_x.blockSignals(False)
 
-            # Auto RangeをOFFにしたので、入力欄（スピンボックス）は有効化しておく
+            # Auto Range is now off, so the spin boxes take over
             if getattr(self, "spin_x_max", None) is not None:
                 self.spin_x_max.setEnabled(True)
             if getattr(self, "spin_x_min", None) is not None:
@@ -1395,20 +1012,9 @@ class NMRDialog(QDialog):
         # Update default X range for this nucleus
         self.update_x_range_defaults(nucleus)
 
+        # Coupling simulation stays off until the user ticks "Simulate Coupling":
+        # nmrsim is too slow on large molecules and merged peaks to run unasked.
         self.apply_filter()
-
-        # User Request: Auto-enable coupling when switching to any nucleus (if coupling exists)
-        # We do this AFTER apply_filter (which calls recalc) so we know if coupons exist for THIS nucleus.
-        if (
-            nucleus != "All"
-            and getattr(self, "chk_real_spectrum", None) is not None
-            and self.chk_real_spectrum.isEnabled()
-        ):
-            self.chk_real_spectrum.blockSignals(True)
-            self.chk_real_spectrum.setChecked(True)
-            self.chk_real_spectrum.blockSignals(False)
-            # Since we blocked signals, manually trigger one plot update if we just checked it
-            self.plot_spectrum()
 
     def update_x_range_defaults(self, nucleus):
         """Set appropriate default X range based on nucleus type"""
@@ -1593,7 +1199,13 @@ class NMRDialog(QDialog):
 
             # Request: For "All", disable coupling (it's confusing/invalid to mix them)
             # ALSO: If reference does not exist, disable (meaningless ppm)
-            if self.current_nucleus == "All":
+            if nmrsim is None:
+                self.chk_real_spectrum.setChecked(False)
+                self.chk_real_spectrum.setEnabled(False)
+                self.chk_real_spectrum.setToolTip(
+                    "Coupling simulation requires the nmrsim library"
+                )
+            elif self.current_nucleus == "All":
                 self.chk_real_spectrum.setChecked(False)
                 self.chk_real_spectrum.setEnabled(False)
                 self.chk_real_spectrum.setToolTip(
@@ -1625,459 +1237,6 @@ class NMRDialog(QDialog):
 
         self.plot_spectrum()
 
-    def plot_spectrum(self):
-        """NMRのスティックスペクトルを描画"""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-
-        # シミュレーションモードなら別メソッドへ
-        if (
-            getattr(self, "chk_real_spectrum", None) is not None
-            and self.chk_real_spectrum.isChecked()
-        ):
-            self.plot_real_spectrum(ax)
-            return
-
-        # 共通ロジックからピークを取得
-        old_metadata = getattr(self, "peaks_metadata", None) or []
-        self.peaks_metadata = self._get_current_peaks()
-        self._remap_selection_to_new_peaks(old_metadata)
-
-        if not self.peaks_metadata:
-            ax.text(
-                0.5,
-                0.5,
-                "No data to display",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=14,
-            )
-            self.canvas.draw_idle()
-            return
-
-        # リストから描画用の値を抽出（NameErrorを解決）
-        shifts = [p[0] for p in self.peaks_metadata]
-        intensities = [p[1] for p in self.peaks_metadata]
-
-        # クリック判定用に保存
-        self.current_shifts = shifts
-
-        # X軸の範囲とパディング
-        min_shift, max_shift = min(shifts), max(shifts)
-        padding = (
-            max(0.5, (max_shift - min_shift) * 0.15) if max_shift > min_shift else 5.0
-        )
-
-        # 描画
-        markerline, stemlines, baseline = ax.stem(
-            shifts, intensities, linefmt="b-", markerfmt="None", basefmt="k-"
-        )
-        stemlines.set_linewidth(2.5)
-        stemlines.set_alpha(0.8)
-        baseline.set_alpha(0.3)
-
-        # 軸の設定
-        if self.chk_auto_x.isChecked():
-            ax.set_xlim(max_shift + padding, min_shift - padding)
-        else:
-            ax.set_xlim(self.spin_x_max.value(), self.spin_x_min.value())
-
-        ax.set_ylim(0, max(intensities) * 1.2)
-        ax.set_xlabel("Chemical Shift δ (ppm)", fontsize=10, fontweight="bold")
-        ax.set_ylabel(
-            f"{self.current_nucleus} Count"
-            if self.current_nucleus != "All"
-            else "Atom Count",
-            fontsize=10,
-            fontweight="bold",
-        )
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.grid(True, alpha=0.2, linestyle="--")
-
-        # タイトル
-        display_nuc = self.get_nucleus_key(self.current_nucleus)
-        ax.set_title(
-            f"{display_nuc} NMR Stick Spectrum", fontsize=12, fontweight="bold", pad=20
-        )
-
-        # 選択中ハイライトの再描画
-        if self.selected_peak_indices:
-            self.highlight_selected_peaks()
-
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-
-    def highlight_selected_peaks(self):
-        """Add red highlights and labels to selected peaks"""
-        if not getattr(self, "current_shifts", None):
-            # Clear highlights if no selection
-            for artist in self.highlight_artists:
-                try:
-                    artist.remove()
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
-            self.highlight_artists = []
-            self.canvas.draw_idle()
-            return
-
-        ax = self.figure.axes[0] if self.figure.axes else None
-        if not ax:
-            return
-
-        # Clear old highlights and labels
-        for artist in self.highlight_artists:
-            try:
-                artist.remove()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-        self.highlight_artists = []
-
-        # Add red highlights and text labels for selected peaks
-        for idx in self.selected_peak_indices:
-            if idx < len(self.current_shifts):
-                shift = self.current_shifts[idx]
-
-                # Draw red line over selected peak (only if not in show_all_mode)
-                if not self.show_all_mode:
-                    line = ax.axvline(
-                        shift,
-                        ymin=0,
-                        ymax=1,
-                        color="red",
-                        linewidth=3.5,
-                        alpha=0.7,
-                        zorder=10,
-                    )
-                    self.highlight_artists.append(line)
-
-                # Add text label above the peak
-                if idx < len(self.peaks_metadata):
-                    # Get peak metadata
-                    _, _, is_merged, atom_indices = self.peaks_metadata[idx]
-
-                    # Build label text from all atoms in this peak
-                    label_parts = []
-                    for atom_idx in atom_indices:
-                        atom_item = next(
-                            (
-                                d
-                                for d in self.data
-                                if d.get("atom_idx", None) == atom_idx
-                            ),
-                            None,
-                        )
-                        if atom_item:
-                            atom_sym = atom_item.get("atom_sym", "?")
-                            label_parts.append(f"{atom_sym}{atom_idx}")
-
-                    label_text = ",".join(label_parts) if label_parts else "?"
-
-                    # Position label above the peak
-                    label_color = "black" if self.show_all_mode else "red"
-                    text = ax.text(
-                        shift,
-                        1.1,
-                        label_text,
-                        ha="center",
-                        va="bottom",
-                        fontsize=10,
-                        fontweight="bold",
-                        color=label_color,
-                        zorder=11,
-                    )
-                    self.highlight_artists.append(text)
-
-        self.canvas.draw_idle()
-
-    def _get_current_peaks(self):
-        """
-        現在の核種フィルタ、マージ設定、リファレンス値に基づき、
-        プロットおよび解析用の共通ピークリストを生成する。
-        Returns: List of (delta, intensity, is_merged, atom_indices)
-        """
-        # 原子インデックスからデータへの高速ルックアップ用マップ
-        atom_map = {d["atom_idx"]: d for d in self.data}
-        # 現在の表示対象原子のインデックスセット
-        displayed_indices = {d["atom_idx"] for d in self.displayed_data}
-
-        peaks = []
-        processed_indices = set()
-
-        # 1. マージされたグループの処理
-        for group in self.merged_peaks:
-            indices = group["indices"]
-            # グループ内の原子が表示対象（現在の核種）に含まれているかチェック
-            if any(idx in displayed_indices for idx in indices):
-                total_sigma = 0.0
-                valid_count = 0
-                for idx in indices:
-                    atom = atom_map.get(idx, None)
-                    if atom:
-                        total_sigma += atom.get("shielding", 0.0)
-                        valid_count += 1
-
-                if valid_count > 0:
-                    avg_sigma = total_sigma / valid_count
-                    avg_delta = self.delta_ref + (self.sigma_ref - avg_sigma)
-                    # 強度はマージされた原子数（積分値）
-                    peaks.append((avg_delta, float(len(indices)), True, indices))
-                    processed_indices.update(indices)
-
-        # 2. 個別（マージされていない）原子の処理
-        for item in self.displayed_data:
-            idx = item.get("atom_idx", None)
-            if idx not in processed_indices:
-                sigma = item.get("shielding", 0.0)
-                delta = self.delta_ref + (self.sigma_ref - sigma)
-                peaks.append((delta, 1.0, False, [idx]))
-
-        # 化学シフトの降順（NMRの慣習）でソートしておくと管理しやすい
-        return sorted(peaks, key=lambda x: x[0], reverse=True)
-
-    def export_spectrum(self):
-        """Export spectrum to file"""
-        current_nucleus = self.current_nucleus
-        default_path = get_default_export_path(
-            self.file_path, suffix=f"_nmr_{current_nucleus}_spectrum", extension=".png"
-        )
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Spectrum",
-            default_path,
-            "PNG Image (*.png);;PDF (*.pdf);;SVG (*.svg)",
-        )
-
-        if filename:
-            try:
-                self.figure.savefig(filename, dpi=300, bbox_inches="tight")
-                if self.parent_dlg and self.parent_dlg.context:
-                    self.parent_dlg.context.show_status_message(
-                        f"Spectrum exported to: {os.path.basename(filename)}", 5000
-                    )
-                else:
-                    logging.info("Spectrum exported to: %s", filename)
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
-
-    def export_spectrum_csv(self):
-        """Export spectrum data to CSV (Stick or Real)"""
-        if not self.displayed_data:
-            QMessageBox.warning(self, "No Data", "No spectrum data to export.")
-            return
-
-        default_path = get_default_export_path(
-            self.file_path,
-            suffix=f"_nmr_{self.current_nucleus}_sticks",
-            extension=".csv",
-        )
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Spectrum CSV", default_path, "CSV Files (*.csv)"
-        )
-        if not filename:
-            return
-
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                # Check mode
-                is_real = (
-                    getattr(self, "chk_real_spectrum", None) is not None
-                    and self.chk_real_spectrum.isChecked()
-                )
-
-                if is_real:
-                    # Export XY data from matplotlib line
-                    ax = self.figure.axes[0] if self.figure.axes else None
-                    if ax and ax.lines:
-                        # The last line drawn is usually the spectrum curve or baseline?
-                        # In plot_real_spectrum, we draw: ax.plot(x_hz_grid / spectrometer_freq, y_total, 'b-', linewidth=1.2)
-                        # We should make sure we grab the right line.
-                        # It is the only 'b-' line usually.
-
-                        # Better approach: Re-calculate the data?
-                        # Extracting from plot is hacky but consistent with what is seen.
-                        # Let's try to extract x,y data from the first non-stem line.
-
-                        line = None
-                        for ln in ax.lines:
-                            # Stems are Line2D but usually handled differently.
-                            # nmrsim plot is a standard plot.
-                            if ln.get_marker() == "None" and ln.get_linestyle() == "-":
-                                line = ln
-                                # If we have multiple, the 'blue' one is the spectrum.
-                                if ln.get_color() == "b":
-                                    break
-
-                        if line:
-                            x_data = line.get_xdata()
-                            y_data = line.get_ydata()
-
-                            f.write("Chemical Shift (ppm),Intensity\n")
-                            for x, y in zip(x_data, y_data):
-                                f.write(f"{x:.6f},{y:.6f}\n")
-                        else:
-                            f.write("Error: Could not extract curve data.\n")
-                    else:
-                        f.write("Error: No plot found.\n")
-                else:
-                    # Stick Spectrum Export
-                    # Export Peak List: Shift, Intensity
-                    f.write("Chemical Shift (ppm),Intensity,AtomIndices\n")
-
-                    # We can use peaks_metadata if available, or reconstruct
-                    if (
-                        getattr(self, "peaks_metadata", None) is not None
-                        and self.peaks_metadata
-                    ):
-                        for (
-                            shift,
-                            intensity,
-                            is_merged,
-                            atom_indices,
-                        ) in self.peaks_metadata:
-                            indices_str = ";".join(str(i) for i in atom_indices)
-                            f.write(f"{shift:.6f},{intensity:.4f},{indices_str}\n")
-                    else:
-                        # Fallback
-                        f.write("# No peak data available.\n")
-
-            if self.parent_dlg and self.parent_dlg.context:
-                self.parent_dlg.context.show_status_message(
-                    f"Spectrum data exported to: {os.path.basename(filename)}", 5000
-                )
-            else:
-                logging.info("Spectrum data exported to: %s", filename)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
-
-    def export_table_csv(self):
-        """Export table data to CSV"""
-        current_nucleus = self.current_nucleus
-        default_path = get_default_export_path(
-            self.file_path, suffix=f"_nmr_{current_nucleus}_table", extension=".csv"
-        )
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Table CSV", default_path, "CSV Files (*.csv)"
-        )
-        if not filename:
-            return
-
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                # Headers
-                headers = []
-                for c in range(self.table.columnCount()):
-                    headers.append(self.table.horizontalHeaderItem(c).text())
-                f.write(",".join(headers) + "\n")
-
-                # Rows
-                for r in range(self.table.rowCount()):
-                    cols = []
-                    for c in range(self.table.columnCount()):
-                        it = self.table.item(r, c)
-                        text = it.text() if it else ""
-                        # Escape commas if present
-                        if "," in text:
-                            text = f'"{text}"'
-                        cols.append(text)
-                    f.write(",".join(cols) + "\n")
-
-            if self.parent_dlg and self.parent_dlg.context:
-                self.parent_dlg.context.show_status_message(
-                    f"Table data exported to: {os.path.basename(filename)}", 5000
-                )
-            else:
-                logging.info("Table data exported to: %s", filename)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
-
-    def get_j_coupling_string(self, atom_indices):
-        """Format J-couplings for a list of atoms (merged or single)"""
-        if not self.couplings:
-            return ""
-
-        # If merged group, we might have too many couplings.
-        # Strategy:
-        # 1. Collect all couplings involving ANY atom in atom_indices.
-        # 2. Filter out couplings WITHIN the group (intra-group couplings often effectively 0 or infinite depending on equivalence,
-        #    but usually we care about couplings to OUTSIDE).
-        # 3. Format as "AtomSymIdx=J"
-        # 4. If multiple atoms in group have SAME coupling to SAME partner (magnetic equivalence), show once.
-
-        relevant_couplings = []  # (PartnerIdx, J)
-        group_set = set(atom_indices)
-
-        # Optimize: Pre-filter couplings? dataset is small usually.
-        for c in self.couplings:
-            idx1 = c["atom_idx1"]
-            idx2 = c["atom_idx2"]
-            j_val = abs(c["coupling"])
-
-            if j_val < 0.1:
-                continue  # Ignore tiny couplings
-
-            partner = None
-            if idx1 in group_set and idx2 not in group_set:
-                partner = idx2
-            elif idx2 in group_set and idx1 not in group_set:
-                partner = idx1
-
-            if partner is not None:
-                relevant_couplings.append((partner, j_val))
-
-        if not relevant_couplings:
-            return ""
-
-        # If merged group, we might see duplicates: (PartnerA, 7.5) from Atom1, (PartnerA, 7.5) from Atom2...
-        # We should average them or check consistency.
-        # Group by partner
-        partner_map = {}
-        for p, j in relevant_couplings:
-            if p not in partner_map:
-                partner_map[p] = []
-            partner_map[p].append(j)
-
-        # Format strings
-        parts = []
-
-        # Sort partners by Atom Index for consistency
-        sorted_partners = sorted(partner_map.keys())
-
-        for p in sorted_partners:
-            # Find symbol for partner
-            p_item = next((d for d in self.data if d.get("atom_idx", None) == p), None)
-            p_sym = p_item.get("atom_sym", "") if p_item else ""
-            p_label = f"{p_sym}{p}"
-
-            j_list = partner_map[p]
-            avg_j = sum(j_list) / len(j_list)
-
-            # If standard deviation is high, maybe indicate?
-            # For now, just show average.
-            parts.append(f"{p_label}={avg_j:.1f}")
-
-        return ", ".join(parts)
-
-    def copy_table(self):
-        """Copy table data to clipboard"""
-        text = "Idx\tNucleus\tShielding\tShift\tJ-coupling\n"
-        for r in range(self.table.rowCount()):
-            cols = []
-            for c in range(self.table.columnCount()):
-                it = self.table.item(r, c)
-                cols.append(it.text() if it else "")
-            text += "\t".join(cols) + "\n"
-        QApplication.clipboard().setText(text)
-        if self.parent_dlg and self.parent_dlg.context:
-            self.parent_dlg.context.show_status_message(
-                "Table data copied to clipboard!", 5000
-            )
-        else:
-            logging.info("Table data copied to clipboard.")
-
     def toggle_simulation_controls(self):
         """Enable/Disable simulation spinboxes based on checkbox state"""
         if getattr(self, "chk_real_spectrum", None) is None:
@@ -2094,659 +1253,16 @@ class NMRDialog(QDialog):
         if getattr(self, "spin_mhz", None) is not None:
             self.spin_mhz.setEnabled(is_sim_active)
 
-    def on_peak_click(self, event):
-        """Handle clicking on a peak in the spectrum"""
-        # Only allow left-click
-        if getattr(event, "button", None) != 1:
-            return
-
-        click_x = event.xdata
-        if click_x is None:
-            return
-
-        # Find nearest peak within tolerance (relative to current x-axis range)
-        xlim = event.inaxes.get_xlim()
-        x_range = abs(xlim[1] - xlim[0])
-        tolerance = x_range * 0.01  # 1% of view width
-
-        distances = [abs(shift - click_x) for shift in self.current_shifts]
-        min_distance = min(distances)
-
-        if min_distance > tolerance:
-            return  # Click too far from any peak
-
-        # Find the clicked peak index
-        peak_idx = distances.index(min_distance)
-
-        # Check for Shift or Ctrl key (using Qt modifiers)
-        modifiers = QApplication.keyboardModifiers()
-        is_multi = bool(
-            modifiers
-            & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier)
-        )
-
-        if peak_idx < len(self.current_shifts):
-            if not is_multi:
-                # Normal click
-                if (
-                    len(self.selected_peak_indices) == 1
-                    and peak_idx in self.selected_peak_indices
-                ):
-                    # User clicked the ONLY selected peak -> Toggle OFF (Deselect)
-                    self.selected_peak_indices = set()
-                else:
-                    # New peak, or switching from multi-selection -> Select ONLY this peak
-                    self.selected_peak_indices = {peak_idx}
-            else:
-                # Shift or Ctrl + Click: Toggle selection
-                if peak_idx in self.selected_peak_indices:
-                    self.selected_peak_indices.remove(peak_idx)
-                else:
-                    self.selected_peak_indices.add(peak_idx)
-
-            # Force a fresh draw on next poll if desired
-            self._last_highlight_atoms = set()
-
-            # Update highlights
-            self.highlight_selected_peaks()
-
-            # Update 3D labels for all selected peaks
-            self.update_selected_labels()
-
-    def update_selected_labels(self, is_external_sync=False):
-        """Update 3D labels and spheres for all selected peaks"""
-        # 1. Clear existing labels
-        self.clear_atom_labels()
-
-        # 2. Add labels for each selected peak
-        all_peak_indices = set()
-
-        for peak_idx in sorted(self.selected_peak_indices):
-            if peak_idx < len(self.peaks_metadata):
-                # Get metadata for this peak (shift, intensity, is_merged, atom_indices)
-                peak_shift, _, is_merged, atom_indices = self.peaks_metadata[peak_idx]
-
-                # Add label for each atom in this peak (handles both merged and individual)
-                for atom_idx in atom_indices:
-                    all_peak_indices.add(atom_idx)
-                    # Find atom symbol from data
-                    atom_item = next(
-                        (d for d in self.data if d.get("atom_idx", None) == atom_idx),
-                        None,
-                    )
-                    if atom_item:
-                        atom_sym = atom_item.get("atom_sym", "?")
-                        shift_text = None
-                        if self._shift_labels_enabled():
-                            # Per-atom original shift; for merged peaks show
-                            # both the atom's own value and the merged
-                            # (averaged) one.
-                            own_delta = getattr(self, "delta_ref", 0.0) + (
-                                getattr(self, "sigma_ref", 0.0)
-                                - atom_item.get("shielding", 0.0)
-                            )
-                            if is_merged:
-                                shift_text = f"δ {own_delta:.2f} → {peak_shift:.2f}"
-                            else:
-                                shift_text = f"δ {own_delta:.2f}"
-                        self.add_atom_label(atom_idx, atom_sym, shift_text)
-
-        # 3. Synchronize with Main Window
-        if hasattr(self.parent_dlg, "mw"):
-            mw = self.parent_dlg.mw
-
-            # If this is a sync FROM 3D (user clicked in viewer), we should NOT clear the 3D selection!
-            # We only clear it if the user clicked in the Graph (internal sync), to replace Green with Yellow.
-            if not is_external_sync:
-                # Ensure we don't have double spheres (Green + Yellow).
-                # We clear the global selection so ONLY our internal Yellow spheres are visible.
-                e3d = getattr(mw, "edit_3d_manager", None)
-                if e3d:
-                    e3d.selected_atoms_3d.clear()
-
-                # CRITICAL: Update our sync tracker so the polling loop knows WE did this
-                # and doesn't interpret the empty set as a user unselection.
-                self._last_synced_mw_selection = frozenset()
-
-                # Sync to MW if we are the originator (internal sync)
-                e3d = getattr(mw, "edit_3d_manager", None)
-                if e3d:
-                    try:
-                        e3d.update_3d_selection_display()
-                    except Exception as _e:
-                        logging.warning("silenced: %s", _e)
-
-            # Draw yellow highlights for NMR selection
-            self.draw_custom_nmr_highlights_3d(all_peak_indices)
-
-            # Render once after all labels added
-            v3d = getattr(self.parent_dlg.mw, "view_3d_manager", None)
-            if v3d and hasattr(v3d, "plotter"):
-                v3d.plotter.render()
-
-    def _shift_labels_enabled(self):
-        """Whether 3D labels should include chemical shift values.
-
-        Uses an explicit isinstance-free truthiness contract: the checkbox may
-        be absent on test fakes, in which case shifts stay hidden (the
-        default).
-        """
-        chk = getattr(self, "chk_label_shifts", None)
-        try:
-            return bool(chk is not None and chk.isChecked())
-        except Exception:
-            return False
-
-    def on_label_shifts_toggled(self):
-        """Re-render the current selection's labels with/without shifts."""
-        # is_external_sync=True: only refresh labels, never clear the 3D
-        # selection the user may have made in the viewer.
-        if self.selected_peak_indices:
-            self.update_selected_labels(is_external_sync=True)
-
-    def add_atom_label(self, atom_idx, atom_sym, shift_text=None):
-        """Add a single atom label to 3D viewer.
-
-        shift_text: optional second label line with the chemical shift
-        (e.g. "δ 7.26" or, for merged peaks, "δ 7.10 → 7.26").
-        """
-        # Check if parent has plotter
-        v3d = (
-            getattr(self.parent_dlg.mw, "view_3d_manager", None)
-            if hasattr(self.parent_dlg, "mw")
-            else None
-        )
-        if not v3d or not hasattr(v3d, "plotter"):
-            return
-
-        # Get coordinates from 3D viewer to match current view
-        if hasattr(v3d, "atom_positions_3d") and atom_idx < len(v3d.atom_positions_3d):
-            pos = v3d.atom_positions_3d[atom_idx]
-        else:
-            # Fallback to parser data
-            coords = self.parent_dlg.parser.data.get("coords", [])
-            if not coords or atom_idx >= len(coords):
-                return
-            pos = coords[atom_idx]
-
-        try:
-            label_pos = [pos[0], pos[1], pos[2] + 0.4]  # Offset above atom
-
-            label_text = f"{atom_sym}{atom_idx}"
-            if shift_text:
-                label_text += f"\n{shift_text}"
-
-            label_name = f"nmr_label_{atom_idx}"
-            actor = v3d.plotter.add_point_labels(
-                [label_pos],
-                [label_text],
-                font_size=12,
-                text_color="cyan",
-                point_size=0,
-                always_visible=True,
-                bold=True,
-                name=label_name,
-            )
-            self._atom_labels.append(actor)
-            self._nmr_label_names.append(label_name)
-        except Exception as e:
-            logging.warning("silenced: %s", e)
-
-    def highlight_atom_in_3d(self, atom_idx, atom_sym):
-        """Highlight selected atom with a label in 3D viewer (legacy - now uses update_selected_labels)"""
-        # This is now handled by update_selected_labels
-
-    def clear_peak_selection(self):
-        """Clear all selected peaks and their labels"""
-        # Clear selected peaks
-        self.selected_peak_indices.clear()
-
-        # Clear highlights
-        for artist in self.highlight_artists:
-            try:
-                artist.remove()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-        self.highlight_artists = []
-
-        # Clear 3D labels
-        self.clear_atom_labels()
-
-        # [Commented out to avoid doubled spheres]
-        if hasattr(self.parent_dlg, "mw"):
-            mw = self.parent_dlg.mw
-            e3d = getattr(mw, "edit_3d_manager", None)
-            if e3d:
-                e3d.selected_atoms_3d.clear()
-                try:
-                    e3d.update_3d_selection_display()
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
-
-        # Redraw spectrum
-        if getattr(self, "canvas", None) is not None:
-            self.canvas.draw_idle()
-
-    def plot_real_spectrum(self, ax):
-        """Jカップリングを考慮したスペクトル描画（共通ロジック完全統合版）"""
-
-        # 1. 【共通ロジック】からピーク情報を取得し、既存コードが期待する変数名に代入
-        peaks_to_simulate = self._get_current_peaks()
-
-        if not peaks_to_simulate:
-            ax.text(
-                0.5,
-                0.5,
-                "No data to simulate",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-            self.canvas.draw_idle()
-            return
-
-        # 2. クラス変数にも保存（クリック判定やハイライト用）
-        old_metadata = getattr(self, "peaks_metadata", None) or []
-        self.peaks_metadata = peaks_to_simulate
-        self._remap_selection_to_new_peaks(old_metadata)
-        self.current_shifts = [p[0] for p in peaks_to_simulate]
-
-        # 3. 核種シンボルの定義
-        target_nuc_sym = self.current_nucleus
-        if target_nuc_sym == "All":
-            if self.displayed_data:
-                target_nuc_sym = self.displayed_data[0].get("atom_sym", "H")
-            else:
-                target_nuc_sym = "H"
-
-        # 4. 周波数と磁気回転比の計算
-        base_freq_mhz = (
-            self.spin_mhz.value()
-            if getattr(self, "spin_mhz", None) is not None
-            else 400.0
-        )
-
-        ratio = 1.0
-        lookup_sym = target_nuc_sym.upper()
-
-        element_only = re.sub(r"[^A-Z]", "", lookup_sym)
-
-        if lookup_sym in self.GAMMA:
-            ratio = abs(self.GAMMA[lookup_sym]) / self.GAMMA["H"]
-        elif element_only in self.GAMMA:
-            ratio = abs(self.GAMMA[element_only]) / self.GAMMA["H"]
-
-        spectrometer_freq = base_freq_mhz * ratio
-        points = 8192
-        width_hz = (
-            max(0.1, self.spin_real_width.value())
-            if getattr(self, "spin_real_width", None) is not None
-            else 0.5
-        )
-
-        # --- Jカップリングの計算とMultiplet生成 ---
-        atom_to_group_size = {
-            idx: len(g["indices"]) for g in self.merged_peaks for idx in g["indices"]
-        }
-        all_multiplets = []
-
-        # 5. ここからループ開始（peaks_to_simulate が定義されているのでエラーになりません）
-        for shift, intensity, is_merged, atom_indices in peaks_to_simulate:
-            peak_atoms_set = set(atom_indices)
-            rep_item = next(
-                (d for d in self.data if d.get("atom_idx", None) == atom_indices[0]),
-                None,
-            )
-            peak_nuc = rep_item.get("atom_sym", "").strip().upper() if rep_item else ""
-
-            couplings_list = []
-
-            # カップリング計算ロジック
-            if (
-                getattr(self, "chk_real_spectrum", None) is not None
-                and self.chk_real_spectrum.isChecked()
-            ):
-                partner_j_values = {}
-                partner_multiplicity = {}
-
-                for atom_idx in atom_indices:
-                    for c in self.couplings:
-                        other = (
-                            c["atom_idx2"]
-                            if c["atom_idx1"] == atom_idx
-                            else (
-                                c["atom_idx1"] if c["atom_idx2"] == atom_idx else None
-                            )
-                        )
-                        if other is not None and other not in peak_atoms_set:
-                            other_item = next(
-                                (d for d in self.data if d["atom_idx"] == other), None
-                            )
-                            if (
-                                other_item
-                                and other_item.get("atom_sym", "").strip().upper()
-                                == peak_nuc
-                            ):
-                                J = abs(c["coupling"])
-                                if J > 0.01:
-                                    pid = next(
-                                        (
-                                            min(g["indices"])
-                                            for g in self.merged_peaks
-                                            if other in g["indices"]
-                                        ),
-                                        other,
-                                    )
-                                    if pid not in partner_j_values:
-                                        partner_j_values[pid] = []
-                                    partner_j_values[pid].append(J)
-                                    partner_multiplicity[pid] = atom_to_group_size.get(
-                                        other, 1
-                                    )
-
-                for pid, j_list in partner_j_values.items():
-                    n_partner = partner_multiplicity[pid]
-                    # Average over the couplings ORCA actually printed, not
-                    # over the theoretical pair count: it commonly reports a
-                    # subset (nucleus selection, symmetry-unique pairs), and
-                    # dividing by the full count scaled J down towards zero
-                    # and collapsed the multiplet.
-                    avg_J = sum(j_list) / len(j_list)
-                    if avg_J > 0.1:
-                        couplings_list.append((avg_J, n_partner))
-
-            if Multiplet:
-                try:
-                    m = Multiplet(shift * spectrometer_freq, intensity, couplings_list)
-                    m.w = width_hz
-                    all_multiplets.append(m)
-                except Exception as e:
-                    logging.error(
-                        "NMR: Multiplet creation failed for shift=%.3f: %s", shift, e
-                    )
-
-        # --- プロット範囲計算 ---
-        if self.chk_auto_x.isChecked():
-            shifts_all_sim = [p[0] for p in peaks_to_simulate]
-            min_s, max_s = min(shifts_all_sim), max(shifts_all_sim)
-            padding = max(0.5, (max_s - min_s) * 0.15) if max_s > min_s else 5.0
-            x_limit_max, x_limit_min = max_s + padding, min_s - padding
-        else:
-            x_limit_max, x_limit_min = self.spin_x_max.value(), self.spin_x_min.value()
-
-        # シミュレーション範囲の計算
-        l_low = min(x_limit_min, x_limit_max) * spectrometer_freq
-        l_high = max(x_limit_min, x_limit_max) * spectrometer_freq
-        if l_low > l_high:
-            l_low, l_high = l_high, l_low
-        span = l_high - l_low
-        if span == 0:
-            span = 100
-        l_low_sim = l_low - span * 0.1
-        l_high_sim = l_high + span * 0.1
-
-        x_hz_grid = np.linspace(l_low_sim, l_high_sim, points)
-        y_total = np.zeros_like(x_hz_grid)
-        gamma = width_hz / 2.0
-
-        # --- nmrsim計算またはフォールバック ---
-        nmrsim_success = False
-        if all_multiplets and Spectrum:
-            try:
-                spec = Spectrum(all_multiplets)
-                x_sim, y_sim = spec.lineshape(points=points)
-                y_total = np.interp(x_hz_grid, x_sim, y_sim, left=0, right=0)
-                if np.max(y_total) >= 1e-9:
-                    nmrsim_success = True
-            except Exception as e:
-                logging.error("NMR: nmrsim Spectrum simulation failed: %s", e)
-
-        if not nmrsim_success:
-            all_peaks = []
-            for p in peaks_to_simulate:
-                freq = p[0] * spectrometer_freq
-                intensity = p[1]
-                all_peaks.append((freq, intensity))
-
-            if all_peaks:
-                vs = np.array([p[0] for p in all_peaks])
-                is_ = np.array([p[1] for p in all_peaks])
-                chunk_size = 100
-                for i in range(0, len(vs), chunk_size):
-                    v_chunk = vs[i : i + chunk_size]
-                    i_chunk = is_[i : i + chunk_size]
-                    for v, inten in zip(v_chunk, i_chunk):
-                        y_total += inten * (
-                            gamma / (np.pi * ((x_hz_grid - v) ** 2 + gamma**2))
-                        )
-
-        # 高さの正規化
-        max_p = max(p[1] for p in peaks_to_simulate) if peaks_to_simulate else 1.0
-        if np.max(y_total) > 0:
-            y_total = y_total / np.max(y_total) * max_p
-
-        # プロット
-        ax.plot(x_hz_grid / spectrometer_freq, y_total, "b-", linewidth=1.2)
-        if np.max(y_total) > 0:
-            ax.set_ylim(0, np.max(y_total) * 1.3)
-
-        # スタイル設定
-        ax.set_xlim(x_limit_max, x_limit_min)
-        ax.set_xlabel("Chemical Shift δ (ppm)", fontsize=10, fontweight="bold")
-        ax.set_ylabel("Intensity", fontsize=10, fontweight="bold")
-        ax.tick_params(axis="both", which="major", labelsize=8)
-
-        # タイトル設定
-        current_nucleus_title = self.current_nucleus
-        display_nuc = self.get_nucleus_key(current_nucleus_title)
-        ref_name_title = (
-            self.combo_ref.currentText()
-            if getattr(self, "combo_ref", None) is not None
-            else "Custom"
-        )
-
-        ax.set_title(
-            f"{display_nuc} NMR Spectrum", fontsize=12, fontweight="bold", pad=20
-        )
-        ref_text = f"Ref: {ref_name_title} (δ_ref = {self.delta_ref:.2f} ppm, σ_ref = {self.sigma_ref:.1f} ppm)"
-        ax.text(
-            0.5,
-            1.02,
-            ref_text,
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-        ax.yaxis.set_visible(True)
-        ax.grid(True, alpha=0.25, linestyle="--", axis="x", linewidth=0.8)
-        ax.grid(True, alpha=0.15, linestyle=":", axis="y", linewidth=0.5)
-
-        self.figure.tight_layout()
-
-        # --- 修正3: イベント接続とハイライト更新 ---
-        # クリックイベントを再接続
-        # self.canvas.mpl_connect('button_press_event', self.on_peak_click)
-
-        # 選択済みのピークがあればハイライト（赤い線やラベル）を再描画
-        if self.selected_peak_indices:
-            self.highlight_selected_peaks()
-
-        self.canvas.draw_idle()
-
-    def toggle_all_labels(self):
-        """Toggle showing all atom labels on the spectrum graph"""
-        show_all = self.chk_show_all_labels.isChecked()
-
-        if show_all:
-            # Enable show all mode (labels without red highlights)
-            self.show_all_mode = True
-            self.selected_peak_indices.clear()
-
-            # Select all peaks to show labels
-            # Use peaks_metadata length if available, otherwise displayed_data as fallback
-            count = (
-                len(self.peaks_metadata)
-                if getattr(self, "peaks_metadata", None) is not None
-                else len(self.displayed_data)
-            )
-            for i in range(count):
-                self.selected_peak_indices.add(i)
-
-            # Update graph with labels only (no red highlights)
-            self.highlight_selected_peaks()
-
-            # For "Show All", we also want to update the 3D view to reflect "All"
-            # or at least clear the specific "red" selection we had.
-            # If we want to show labels for ALL atoms in 3D:
-            self.update_selected_labels()
-        else:
-            # Disable show all mode
-            self.show_all_mode = False
-            # Clear all selections (graph and 3D)
-            self.clear_peak_selection()
-
-    def clear_atom_labels(self):
-        """Remove all atom labels and custom selection spheres from 3D viewer"""
-        v3d = (
-            getattr(self.parent_dlg.mw, "view_3d_manager", None)
-            if hasattr(self.parent_dlg, "mw")
-            else None
-        )
-        if not v3d or not hasattr(v3d, "plotter"):
-            return
-
-        plotter = v3d.plotter
-
-        # 1. Clear custom NMR selection spheres by name (most reliable in PyVista)
-        try:
-            plotter.remove_actor("nmr_selection_highlights")
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
-
-        # 2. Clear labels by tracked name
-        if getattr(self, "_nmr_label_names", None) is not None:
-            for name in self._nmr_label_names:
-                try:
-                    plotter.remove_actor(name)
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
-            self._nmr_label_names = []
-
-        # 3. Fallback: Clear labels by list reference
-        for actor in self._atom_labels:
-            try:
-                plotter.remove_actor(actor)
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-        self._atom_labels = []
-
-        # 4. Clean up private spheres actor list
-        if getattr(self, "_nmr_sphere_actors", None) is not None:
-            for actor in self._nmr_sphere_actors:
-                try:
-                    plotter.remove_actor(actor)
-                except Exception as _e:
-                    logging.warning("silenced: %s", _e)
-            self._nmr_sphere_actors = []
-
-        try:
-            plotter.render()
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
-
-    def draw_custom_nmr_highlights_3d(self, atom_indices):
-        """Draw yellow highlight spheres for selected atoms in 3D viewer"""
-        mw = self.parent_dlg.mw if hasattr(self.parent_dlg, "mw") else None
-        v3d = getattr(mw, "view_3d_manager", None) if mw else None
-        if not v3d or not hasattr(v3d, "plotter"):
-            return
-
-        plotter = v3d.plotter
-
-        # ALWAYS clear existing custom highlights first to prevent stacking/phantom spheres
-        try:
-            plotter.remove_actor("nmr_selection_highlights")
-        except Exception as _e:
-            logging.warning("silenced: %s", _e)
-
-        # Clear tracker list to prevent stale references
-        self._nmr_sphere_actors = []
-
-        # If no indices provided, just render the cleared state and return
-        if not atom_indices or not hasattr(v3d, "atom_positions_3d"):
-            try:
-                plotter.render()
-            except Exception as _e:
-                logging.warning("silenced: %s", _e)
-            return
-
-        indices = list(atom_indices)
-        valid_indices = [
-            i for i in indices if i < len(mw.view_3d_manager.atom_positions_3d)
-        ]
-
-        if not valid_indices:
-            return
-
-        try:
-            # Get positions
-            selected_positions = mw.view_3d_manager.atom_positions_3d[valid_indices]
-
-            # Highlight sphere size: 40% (1.4x) relative to VDW radii per user request
-            radii = []
-
-            for i in valid_indices:
-                try:
-                    # Try to match the exact radius used by the 3D viewer
-                    base_r = float(mw.view_3d_manager.glyph_source["radii"][i])
-                    if base_r < 0.1:
-                        raise ValueError("Radius too small")
-                except Exception:
-                    # Fallback to calculated radius if not available
-                    atom_item = next(
-                        (d for d in self.data if i == d.get("atom_idx", None)), None
-                    )
-                    sym = atom_item.get("atom_sym", "C") if atom_item else "C"
-                    # Strip isotopes like "13C" -> "C"
-                    clean_sym = re.sub(r"[^A-Za-z]", "", sym)
-                    base_r = VDW_RADII.get(clean_sym, 0.4)
-
-                # Use 1.4x scaling factor (40% larger)
-                r = base_r * 1.4
-                radii.append(r)
-
-            # Create glyphs for highlights
-            highlight_source = pv.PolyData(selected_positions)
-            highlight_source["radii"] = np.array(radii)
-
-            highlight_glyphs = highlight_source.glyph(
-                scale="radii",
-                geom=pv.Sphere(radius=1.0, theta_resolution=16, phi_resolution=16),
-                orient=False,
-            )
-
-            # Add to plotter and track actor
-            actor = plotter.add_mesh(
-                highlight_glyphs,
-                color="yellow",
-                opacity=0.3,
-                name="nmr_selection_highlights",
-            )
-            self._nmr_sphere_actors.append(actor)
-            plotter.render()
-
-        except Exception as e:
-            logging.warning("silenced: %s", e)
-
     def reset_selection(self):
         """Reset all NMR selection state — call this on document reset."""
         self.sel_timer.stop()
         try:
             self.clear_peak_selection()
-        except Exception as _e:
-            logging.warning("[nmr_analysis.py:reset_selection] silenced: %s", _e)
+        # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning(
+                "NMR: could not clear the peak selection on document reset: %s", e
+            )
         self._last_synced_mw_selection = frozenset()
         self.sel_timer.start(200)
 
@@ -2770,7 +1286,10 @@ class NMRDialog(QDialog):
                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard,
             )
             if reply == QMessageBox.StandardButton.Save:
-                self.save_merged_peaks()
+                if not self.save_merged_peaks():
+                    self.sel_timer.start(200)
+                    event.ignore()
+                    return
             self._merged_dirty = False
 
         self.save_settings()

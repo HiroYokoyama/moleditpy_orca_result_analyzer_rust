@@ -8,25 +8,26 @@ at module level in tests that need them.  `parser.py` and `utils.py` are
 loaded directly via `importlib.util` with no stubs at all, since they have
 no Qt or third-party dependencies.
 
-**Current status: 382 tests, all passing. `parser.py` coverage: 79%.
-Static analysis (ruff): 9 minor issues (7 × E741 ambiguous names in quantum
-chemistry code, 2 × E402 intentional imports-after-metadata in `__init__.py`).
-All E722 bare-except violations resolved.**
+All canonical Python 5.0.1 tests and sample fixtures are synchronized. Native-only
+MO/parser regression tests remain alongside them. Python tests remain identical after the package-name substitution.
+
+Build both extensions first, then use `python run_tests.py` so installed pytest
+plugins cannot load a real Qt binding before the stubs.
 
 ## Running
 
 ```bash
 # Run all tests
-python -m pytest tests/ -v
+python run_tests.py tests/ -v
 
 # Run a single file
-python -m pytest tests/test_parser.py -v
+python run_tests.py tests/test_parser.py -v
 
 # Run a single test
-python -m pytest tests/test_parser.py::TestParseBasic::test_scf_energy -v
+python run_tests.py tests/test_parser.py::TestParseBasic::test_scf_energy -v
 
 # Run with coverage
-python -m pytest tests/ --cov=orca_result_analyzer --cov-report=term-missing
+python run_tests.py tests/ --cov=orca_result_analyzer --cov-report=term-missing
 ```
 
 ## Test Files

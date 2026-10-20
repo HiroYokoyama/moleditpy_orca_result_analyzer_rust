@@ -4,7 +4,7 @@ Shows whatever correlated-method components the parser found (MP2 correlation
 and total; CCSD(T) reference / correlation / (T) / totals; T1 diagnostic).
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -16,6 +16,8 @@ from .bond_analysis import _make_table
 
 
 class EnergyComponentsDialog(QDialog):
+    """Dialog listing post-HF correlation energy components (MP2, CCSD(T), T1)."""
+
     def __init__(self, parent, data):
         super().__init__(parent)
         self.setWindowTitle("Energy Components")

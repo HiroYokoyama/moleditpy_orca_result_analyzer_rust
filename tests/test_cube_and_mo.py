@@ -14,32 +14,30 @@ import sys
 import importlib.util
 import unittest
 
+sys.path.insert(0, os.path.dirname(__file__))
+from _parser_loader import load_standalone_parser  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 _HERE = os.path.dirname(__file__)
 _SAMPLES = os.path.join(_HERE, "sample_outputs")
-_CUBE_FILE = os.path.join(_SAMPLES, "benzene-opt-ene_cubes", "benzene-opt-ene_MO_21.cube")
+_CUBE_FILE = os.path.join(
+    _SAMPLES, "benzene-opt-ene_cubes", "benzene-opt-ene_MO_21.cube"
+)
 _ENE_FILE = os.path.join(_SAMPLES, "benzene-opt-ene.out")
 
-_PARSER_SRC = os.path.normpath(
-    os.path.join(_HERE, "..", "orca_result_analyzer_rust", "parser.py")
-)
-_VIS_SRC = os.path.normpath(
-    os.path.join(_HERE, "..", "orca_result_analyzer_rust", "vis.py")
-)
+_VIS_SRC = os.path.normpath(os.path.join(_HERE, "..", "orca_result_analyzer_rust", "vis.py"))
 
 # ---------------------------------------------------------------------------
 # Bootstrap: parser (no Qt needed)
 # ---------------------------------------------------------------------------
 
+
 def _load_parser():
-    spec = importlib.util.spec_from_file_location("orca_parser_cube_mo", _PARSER_SRC)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["orca_parser_cube_mo"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_standalone_parser("orca_parser_cube_mo")
+
 
 _parser_mod = _load_parser()
 OrcaParser = _parser_mod.OrcaParser
@@ -57,9 +55,10 @@ def _load_ene():
 # Standalone cube reader (mirrors vis._parse_cube, no PyVista required)
 # ---------------------------------------------------------------------------
 
+
 def _parse_cube_standalone(filepath):
     """Minimal cube reader for testing — equivalent to CubeVisualizer._parse_cube."""
-    import numpy as np
+
     with open(filepath, "r") as f:
         lines = f.readlines()
 
@@ -91,6 +90,7 @@ def _parse_cube_standalone(filepath):
 # ---------------------------------------------------------------------------
 # TestParseCube — benzene-opt-ene_MO_21.cube
 # ---------------------------------------------------------------------------
+
 
 class TestParseCube(unittest.TestCase):
     """Real cube file: HOMO-1 (MO 22) of benzene, 40x40x40 grid in Bohr."""
@@ -156,6 +156,7 @@ class TestParseCube(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # TestParseOrbitalEnergies — benzene-opt-ene.out
 # ---------------------------------------------------------------------------
+
 
 class TestParseOrbitalEnergies(unittest.TestCase):
     """ORBITAL ENERGIES section from benzene single-point (ORCA 6.1.1)."""
@@ -238,6 +239,7 @@ class TestParseOrbitalEnergies(unittest.TestCase):
 # TestParseMoCoeffs — benzene-opt-ene.out
 # ---------------------------------------------------------------------------
 
+
 class TestParseMoCoeffs(unittest.TestCase):
     """MOLECULAR ORBITALS (RHF, ROHF) section from benzene single-point."""
 
@@ -303,6 +305,79 @@ class TestParseMoCoeffs(unittest.TestCase):
         sample = self.mc["0_restricted"]["coeffs"][0]
         for field in ("atom_idx", "sym", "orb", "coeff"):
             self.assertIn(field, sample)
+
+
+# ---------------------------------------------------------------------------
+# Real vis._parse_cube — MO cubes with the negative-atom-count convention
+# ---------------------------------------------------------------------------
+
+
+def _load_vis():
+    import types
+    from unittest.mock import MagicMock
+
+    if "pyvista" not in sys.modules:
+        _pv = types.ModuleType("pyvista")
+        _pv.StructuredGrid = MagicMock
+        sys.modules["pyvista"] = _pv
+    spec = importlib.util.spec_from_file_location("orca_vis_cube_mo", _VIS_SRC)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["orca_vis_cube_mo"] = mod
+    spec.loader.exec_module(mod)
+    # Other test modules stub numpy process-wide; _parse_cube only needs
+    # np.array, so pin a list-based shim for deterministic assertions.
+    mod.np = types.SimpleNamespace(
+        array=lambda seq, dtype=None: [float(v) for v in seq]
+    )
+    return mod
+
+
+class TestParseCubeNegativeNAtoms(unittest.TestCase):
+    """Gaussian-convention MO cube: n_atoms < 0 means a DSET_IDS line
+    (count + MO ids) sits between the atom block and the volumetric data.
+    The old parser never skipped it, so such cubes failed to load (or
+    shifted every data value)."""
+
+    _HEADER = (
+        "MO cube\n"
+        "test\n"
+        "   -1    0.0 0.0 0.0\n"
+        "    2    1.0 0.0 0.0\n"
+        "    2    0.0 1.0 0.0\n"
+        "    2    0.0 0.0 1.0\n"
+        "    1    1.0    0.0 0.0 0.0\n"
+    )
+    _DATA = "1.0 2.0 3.0 4.0\n5.0 6.0 7.0 8.0\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vis_mod = _load_vis()
+
+    def _parse(self, text):
+        import tempfile
+
+        vis = self.vis_mod.CubeVisualizer.__new__(self.vis_mod.CubeVisualizer)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "mo.cube")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            return vis._parse_cube(path)
+
+    def test_dset_ids_line_is_skipped(self):
+        meta = self._parse(self._HEADER + "    1    5\n" + self._DATA)
+        self.assertEqual(meta["dims"], (2, 2, 2))
+        self.assertEqual(list(meta["data"]), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+
+    def test_wrapped_dset_ids_block_is_skipped(self):
+        ids = "    3    5 6\n    7\n"  # 3 ids wrapped over two lines
+        meta = self._parse(self._HEADER + ids + self._DATA)
+        self.assertEqual(list(meta["data"]), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+
+    def test_positive_n_atoms_cube_unchanged(self):
+        vis = self.vis_mod.CubeVisualizer.__new__(self.vis_mod.CubeVisualizer)
+        meta = vis._parse_cube(_CUBE_FILE)
+        self.assertEqual(meta["dims"], (40, 40, 40))
+        self.assertEqual(len(meta["data"]), 40 * 40 * 40)
 
 
 if __name__ == "__main__":

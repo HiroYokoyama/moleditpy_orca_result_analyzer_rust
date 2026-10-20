@@ -19,13 +19,16 @@ Rust engine local.
 | Layer | Files | Rule |
 |---|---|---|
 | **Rust engine (local, do NOT sync from Python)** | `orca_result_analyzer_rust/parser.py`, `mo_engine.py`, `crates/orca_parser_rs/`, `crates/orca_mo_rs/` | Edit here; these wrap the compiled `.pyd`/`.so`. Their **public API is a drop-in** for the Python engine: `OrcaParser` (with the same `self.data` contract), `BasisSetEngine`, `CalcWorker`. |
-| **Synced from the Python plugin** | every other `*.py` (all `*_analysis.py`, `gui.py`, `__init__.py`, `mo_analysis.py`, `spectrum_widget.py`, `vis.py`, `utils.py`, `energy_diag.py`, …) | When the Python plugin changes these, copy them over. `mo_analysis.py` is synced but binds to the **local** `mo_engine` (same class names). |
+| **Synced from the Python plugin** | every other `*.py`, including parser compatibility mixins (all `*_analysis.py`, `gui.py`, `__init__.py`, `mo_analysis.py`, `spectrum_widget.py`, `vis.py`, `utils.py`, `energy_diag.py`, …) | When the Python plugin changes these, copy them over. `mo_analysis.py` is synced but binds to the **local** `mo_engine` (same class names). |
 | **Rust-only** | `logger.py`, `mo_energy_diag.py`, `build.py` | Local; may be unused by synced code but kept. |
 
 **Version:** `orca_result_analyzer_rust/__init__.py` `PLUGIN_VERSION` mirrors the
 Python plugin's version (same functionality → same number). The
 `pyproject.toml` / `Cargo.toml` versions are the build-artifact versions and are
-managed separately.
+managed separately; this 5.0.1 synchronization aligns them with the plugin version.
+The supported native wheel range is Python 3.9–3.13.
+NBO/spin sections and helper APIs use shared Python mixins; bulk parsing and MO
+grid evaluation remain native. Native-pass cancellation takes effect after it returns.
 
 When syncing, do **not** blindly overwrite `parser.py` / `mo_engine.py`, and
 after copying dialog modules verify the seam names still resolve

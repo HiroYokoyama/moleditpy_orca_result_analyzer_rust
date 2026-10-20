@@ -2,7 +2,7 @@
 tests/test_traj_analysis.py
 Unit tests for pure-logic methods in traj_analysis.TrajectoryResultDialog.
 
-PyQt6, matplotlib Qt backends, rdkit, and PIL are fully stubbed at module
+PySide6, matplotlib Qt backends, rdkit, and PIL are fully stubbed at module
 level so that the tests run headlessly without any display server or Qt
 installation.  Only compute_scan_points and update_display_values are tested
 here — both are self-contained data-transformation methods.
@@ -23,7 +23,7 @@ def _install_stubs(force=False):
     if "traj_analysis_test_stubs_installed" in sys.modules and not force:
         return
 
-    # --- PyQt6 ---
+    # --- PySide6 ---
     # QDialog and FigureCanvasQTAgg must be real inheritable classes, not
     # MagicMock() instances, because traj_analysis inherits from them.
     # All other Qt widgets are only instantiated, so MagicMock() is fine.
@@ -51,10 +51,10 @@ def _install_stubs(force=False):
         class WindowType:
             Window = 1
 
-    existing_widgets = sys.modules.get("PyQt6.QtWidgets")
-    existing_core = sys.modules.get("PyQt6.QtCore")
-    existing_gui = sys.modules.get("PyQt6.QtGui")
-    existing_pyqt6 = sys.modules.get("PyQt6")
+    existing_widgets = sys.modules.get("PySide6.QtWidgets")
+    existing_core = sys.modules.get("PySide6.QtCore")
+    existing_gui = sys.modules.get("PySide6.QtGui")
+    existing_pyside6 = sys.modules.get("PySide6")
 
     _TRAJ_WIDGET_MOCKS = [
         "QVBoxLayout",
@@ -92,10 +92,10 @@ def _install_stubs(force=False):
             if not hasattr(existing_gui, "QColor"):
                 existing_gui.QColor = MagicMock()
     else:
-        _pyqt6 = existing_pyqt6 or types.ModuleType("PyQt6")
-        _core = existing_core or types.ModuleType("PyQt6.QtCore")
-        _widgets = types.ModuleType("PyQt6.QtWidgets")
-        _gui = existing_gui or types.ModuleType("PyQt6.QtGui")
+        _pyside6 = existing_pyside6 or types.ModuleType("PySide6")
+        _core = existing_core or types.ModuleType("PySide6.QtCore")
+        _widgets = types.ModuleType("PySide6.QtWidgets")
+        _gui = existing_gui or types.ModuleType("PySide6.QtGui")
 
         _core.Qt = _Qt
         _core.QTimer = MagicMock()
@@ -105,16 +105,16 @@ def _install_stubs(force=False):
             setattr(_widgets, name, MagicMock())
         _gui.QColor = MagicMock()
 
-        _pyqt6.QtCore = _core
-        _pyqt6.QtWidgets = _widgets
-        _pyqt6.QtGui = _gui
+        _pyside6.QtCore = _core
+        _pyside6.QtWidgets = _widgets
+        _pyside6.QtGui = _gui
 
         sys.modules.update(
             {
-                "PyQt6": _pyqt6,
-                "PyQt6.QtCore": _core,
-                "PyQt6.QtWidgets": _widgets,
-                "PyQt6.QtGui": _gui,
+                "PySide6": _pyside6,
+                "PySide6.QtCore": _core,
+                "PySide6.QtWidgets": _widgets,
+                "PySide6.QtGui": _gui,
             }
         )
 
@@ -149,6 +149,7 @@ def _install_stubs(force=False):
     )
     _orca_utils.list_orca_output_files = lambda directory: []  # no-op stub
     _orca_utils.clear_atom_color_overrides = lambda mw: None  # no-op stub
+    _orca_utils.notify = lambda owner, message, timeout=3000: False  # no-op stub
 
     _orca_spectrum = types.ModuleType("orca_result_analyzer_rust.spectrum_widget")
     _orca_spectrum.SpectrumWidget = MagicMock()
@@ -561,9 +562,7 @@ class TestGoToFirstLastFrame(unittest.TestCase):
         fake.slider.setValue.assert_called_once_with(0)
 
     def test_go_to_last_frame_stops_playback_first(self):
-        fake = _FakeNavDialog(
-            steps=[{"energy": 1.0}, {"energy": 2.0}], is_playing=True
-        )
+        fake = _FakeNavDialog(steps=[{"energy": 1.0}, {"energy": 2.0}], is_playing=True)
         TrajectoryResultDialog.go_to_last_frame(fake)
         self.assertEqual(fake.toggle_play_calls, 1)
         fake.slider.setValue.assert_called_once_with(1)

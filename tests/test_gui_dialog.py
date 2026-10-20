@@ -54,7 +54,9 @@ class TestStatusSuffix(unittest.TestCase):
         self.assertIn("2 imaginary modes", suffix)
 
     def test_a_zero_frequency_is_not_imaginary(self):
-        self.assertEqual(G.build_status_suffix({"frequencies": [{"freq": 0.0}]}), ("", 0))
+        self.assertEqual(
+            G.build_status_suffix({"frequencies": [{"freq": 0.0}]}), ("", 0)
+        )
 
     def test_a_frequency_entry_without_a_value_is_not_imaginary(self):
         self.assertEqual(G.build_status_suffix({"frequencies": [{}]}), ("", 0))
@@ -111,9 +113,16 @@ class TestButtonStates(_GuiCase):
     def test_everything_is_disabled_without_data(self):
         dlg = self._with()
         for btn in (
-            dlg.btn_mo, dlg.btn_freq, dlg.btn_traj, dlg.btn_forces,
-            dlg.btn_therm, dlg.btn_tddft, dlg.btn_dipole, dlg.btn_charge,
-            dlg.btn_nmr, dlg.btn_scf,
+            dlg.btn_mo,
+            dlg.btn_freq,
+            dlg.btn_traj,
+            dlg.btn_forces,
+            dlg.btn_therm,
+            dlg.btn_tddft,
+            dlg.btn_dipole,
+            dlg.btn_charge,
+            dlg.btn_nmr,
+            dlg.btn_scf,
         ):
             self.assertFalse(btn.isEnabled())
 

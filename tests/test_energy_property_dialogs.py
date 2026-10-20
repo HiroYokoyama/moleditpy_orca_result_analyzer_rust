@@ -12,7 +12,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 import gui_harness  # noqa: E402
 
-EnergyComponentsDialog = gui_harness.load_isolated("energy_analysis").EnergyComponentsDialog
+EnergyComponentsDialog = gui_harness.load_isolated(
+    "energy_analysis"
+).EnergyComponentsDialog
 PropertiesDialog = gui_harness.load_isolated("property_analysis").PropertiesDialog
 
 

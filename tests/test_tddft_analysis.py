@@ -443,6 +443,41 @@ class TestSettings(_TDDFTCase):
         self.dlg.save_settings()
         self.context.show_status_message.assert_called()
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        others = {
+            "mo_settings": {"iso": 0.02},
+            "nmr_settings": {"ref": "TMS"},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.settings_path, "w", encoding="utf-8") as fh:
+            json.dump(others, fh)
+
+        self.dlg.spin_sigma.setValue(999.0)
+        self.dlg.save_settings()
+
+        with open(self.settings_path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertEqual(on_disk["tddft_settings"]["sigma"], 999.0)
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        self.dlg.spin_sigma.setValue(555.0)
+        self.dlg.save_settings()
+
+        section = S.load_section(self.settings_path, "tddft_settings")
+        self.assertEqual(section["sigma"], 555.0)
+
+    def test_non_numeric_sigma_does_not_crash_load(self):
+        # float(settings["sigma"]) raises ValueError; the narrowed handler
+        # must swallow it (and still unblock the spinbox signals), not crash.
+        with open(self.settings_path, "w", encoding="utf-8") as fh:
+            json.dump({"tddft_settings": {"sigma": "not_a_number"}}, fh)
+        self.dlg.spin_sigma.setValue(777.0)
+        self.dlg.load_settings()  # must not raise
+        self.assertEqual(self.dlg.spin_sigma.value(), 777.0)
+
     def test_close_persists_settings(self):
         self.dlg.spin_sigma.setValue(4321.0)
         self.dlg.closeEvent(MagicMock())
@@ -610,7 +645,7 @@ class TestExports(_TDDFTCase):
         with patch.object(T.QFileDialog, "getSaveFileName", return_value=(path, "")):
             dlg.save_orca_report()
         text = open(path, encoding="utf-8").read()
-        self.assertIn("3.0996", text)   # 1239.84193 / 400
+        self.assertIn("3.0996", text)  # 1239.84193 / 400
         self.assertIn("25000.0", text)  # 1e7 / 400
 
     def test_report_without_data_warns(self):

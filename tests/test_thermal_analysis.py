@@ -3,7 +3,7 @@ tests/test_thermal_analysis.py
 Unit tests for ThermalTableDialog's pure logic: the update_table row builder,
 copy_table, export_csv, and the settings load/save round-trip.
 
-PyQt6 is stubbed so the module imports headlessly; the dialog's Qt constructor
+PySide6 is stubbed so the module imports headlessly; the dialog's Qt constructor
 is bypassed (object.__new__) and lightweight fakes stand in for the checkbox
 and table so the row-generation logic can be exercised directly.
 """
@@ -250,7 +250,9 @@ class TestSettings(unittest.TestCase):
 
     def test_load_missing_file_is_noop(self):
         dlg = _bare_dialog({}, show_details=False)
-        dlg.settings_file = os.path.join(tempfile.gettempdir(), "does_not_exist_xyz.json")
+        dlg.settings_file = os.path.join(
+            tempfile.gettempdir(), "does_not_exist_xyz.json"
+        )
         dlg.load_settings()  # must not raise
         self.assertFalse(dlg.chk_details.isChecked())
 
@@ -264,6 +266,59 @@ class TestSettings(unittest.TestCase):
             dlg.load_settings()  # must not raise
         self.assertFalse(dlg.chk_details.isChecked())
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        with tempfile.TemporaryDirectory() as d:
+            settings = os.path.join(d, "settings.json")
+            others = {
+                "mo_settings": {"iso": 0.02},
+                "nmr_settings": {"ref": "TMS"},
+                "dipole_settings": {"res": 20},
+            }
+            with open(settings, "w", encoding="utf-8") as f:
+                json.dump(others, f)
+
+            dlg = _bare_dialog({}, show_details=True)
+            dlg.settings_file = settings
+            dlg.save_settings()
+
+            with open(settings, encoding="utf-8") as f:
+                on_disk = json.load(f)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertTrue(on_disk["thermal_settings"]["show_details"])
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        with tempfile.TemporaryDirectory() as d:
+            settings = os.path.join(d, "settings.json")
+            dlg = _bare_dialog({}, show_details=True)
+            dlg.settings_file = settings
+            dlg.save_settings()
+
+            section = S.load_section(settings, "thermal_settings")
+            self.assertTrue(section["show_details"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExportFailure(unittest.TestCase):
+    def test_a_failed_export_is_reported_to_the_user(self):
+        dlg = _bare_dialog({"gibbs": -76.5})
+        dlg.update_table()
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "a_file")
+            with open(blocker, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            saved_fd, saved_mb = T.QFileDialog, T.QMessageBox
+            T.QFileDialog, T.QMessageBox = MagicMock(), MagicMock()
+            T.QFileDialog.getSaveFileName.return_value = (
+                os.path.join(blocker, "thermo.csv"),
+                "",
+            )
+            try:
+                dlg.export_csv()
+                T.QMessageBox.critical.assert_called_once()
+            finally:
+                T.QFileDialog, T.QMessageBox = saved_fd, saved_mb

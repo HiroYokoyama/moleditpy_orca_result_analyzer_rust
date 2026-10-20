@@ -145,9 +145,7 @@ class TestVectorsAtDisplacedPositions(_VectorCase):
     def test_the_redrawn_arrows_use_the_chosen_colour(self):
         self.dlg.vector_color = "#00ff00"
         self.dlg.update_vectors_at_displaced_position()
-        self.assertEqual(
-            self.plotter.add_arrows.call_args.kwargs["color"], "#00ff00"
-        )
+        self.assertEqual(self.plotter.add_arrows.call_args.kwargs["color"], "#00ff00")
 
     def test_redrawing_removes_the_previous_arrows(self):
         previous = object()

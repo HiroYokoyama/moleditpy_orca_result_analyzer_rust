@@ -69,14 +69,13 @@ class _ConvCase(unittest.TestCase):
         self.dlg = F.ConvergenceGraphDialog(self.host, _steps(), current_idx=1)
 
     def _export(self, path):
-        """export_csv imports Qt lazily inside the method body."""
+        """QFileDialog is imported lazily in the method; QMessageBox at module level."""
         file_dialog = MagicMock()
         file_dialog.getSaveFileName.return_value = (path, "")
         message_box = MagicMock()
-        with gui_harness.qt_available(
-            QFileDialog=file_dialog, QMessageBox=message_box
-        ):
-            self.dlg.export_csv()
+        with gui_harness.qt_available(QFileDialog=file_dialog):
+            with patch.object(F, "QMessageBox", message_box):
+                self.dlg.export_csv()
         return message_box
 
 
@@ -334,6 +333,57 @@ class TestForceViewer(_ForceCase):
         warn.assert_called_once()
         graph.assert_not_called()
 
+    def test_save_preserves_several_other_dialogs_sections(self):
+        import json
+
+        others = {
+            "mo_settings": {"iso": 0.02},
+            "nmr_settings": {"ref": "TMS"},
+            "thermal_settings": {"show_details": True},
+        }
+        with open(self.dlg.settings_file, "w", encoding="utf-8") as fh:
+            json.dump(others, fh)
+
+        self.dlg.force_color = "#abcdef"
+        self.dlg.save_settings()
+
+        with open(self.dlg.settings_file, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        for key, val in others.items():
+            self.assertEqual(on_disk[key], val)
+        self.assertEqual(on_disk["force_settings"]["force_color"], "#abcdef")
+
+    def test_round_trips_through_the_shared_helpers(self):
+        S = gui_harness.load_isolated("settings")
+        self.dlg.force_color = "#112233"
+        self.dlg.save_settings()
+
+        section = S.load_section(self.dlg.settings_file, "force_settings")
+        self.assertEqual(section["force_color"], "#112233")
+
+    def test_update_vectors_noops_once_closing(self):
+        """QTimer.singleShot(100, self.update_vectors) can fire after the
+        dialog is closed; the guard must return before touching the plotter."""
+        self.dlg._is_closing = True
+        with patch.object(self.dlg, "clear_vectors") as clear:
+            self.dlg.update_vectors()
+        clear.assert_not_called()
+        self.plotter.remove_actor.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnavailableCycleEnergy(_ForceCase):
+    def test_missing_energy_is_explicit_and_geometry_still_updates(self):
+        self.dlg.traj_steps[0]["energy"] = None
+        with patch.object(self.dlg, "update_structure") as structure:
+            self.dlg.on_trajectory_change(0)
+        self.assertEqual(self.dlg.traj_info.text(), "Energy: not available")
+        structure.assert_called_once_with(self.dlg.traj_steps[0]["atoms"], self.dlg.traj_steps[0]["coords"])
+
+    def test_zero_is_a_valid_energy_when_explicitly_present(self):
+        self.dlg.traj_steps[0]["energy"] = 0.0
+        self.dlg.on_trajectory_change(0)
+        self.assertEqual(self.dlg.traj_info.text(), "Energy: 0.00000000 Eh")
