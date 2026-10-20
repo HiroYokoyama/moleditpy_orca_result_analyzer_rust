@@ -60,6 +60,19 @@ Python版で行い、共通ファイルをコピーして維持します。
 - `__init__.py`: 機能バージョンはPython版と同じ5.0.1です。現行PyO3ツールチェーンに
   合わせ、Rust版の対応Python範囲は3.9–3.13です。
 
+## README用画像
+
+`img/` の画像も同期元からコピーし、同名ファイルを含めてバイト単位で一致させます。
+
+- `img/charge.png`
+- `img/conv_threshold.png`
+- `img/freq.png`
+- `img/main.png`
+- `img/mo.png`
+- `img/mo_compare.png`
+- `img/nmr.png`
+- `img/opt.png`
+
 ## テストとデータ
 
 Python版の全73テストモジュール（2,459個の `test_*` 関数）をコピーしています。

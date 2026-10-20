@@ -42,6 +42,12 @@ def check(source):
         if ast.dump(actual) != ast.dump(expected):
             errors.append(f"shared MO API differs: {name}")
 
+    for name in manifest.get("shared_images", []):
+        upstream_image = source / "img" / name
+        local_image = ROOT / "img" / name
+        if not local_image.is_file() or upstream_image.read_bytes() != local_image.read_bytes():
+            errors.append(f"shared image differs: {name}")
+
     upstream_tests = source / "tests"
     for path in upstream_tests.rglob("*"):
         if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
@@ -71,4 +77,4 @@ if __name__ == "__main__":
     failures = check(args.source.resolve())
     if failures:
         raise SystemExit("\n".join(failures))
-    print("Canonical shared modules, MO APIs and all tests/fixtures match.")
+    print("Canonical shared modules, MO APIs, images and all tests/fixtures match.")

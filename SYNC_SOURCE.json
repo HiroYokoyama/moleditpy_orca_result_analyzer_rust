@@ -121,5 +121,15 @@
     "parser_electronic.py",
     "parser_properties.py",
     "parser_spectra.py"
+  ],
+  "shared_images": [
+    "charge.png",
+    "conv_threshold.png",
+    "freq.png",
+    "main.png",
+    "mo.png",
+    "mo_compare.png",
+    "nmr.png",
+    "opt.png"
   ]
 }
