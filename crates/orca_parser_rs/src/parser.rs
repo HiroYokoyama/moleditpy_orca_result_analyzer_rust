@@ -24,7 +24,7 @@ const IMAGINARY_FREQ_THRESHOLD: f64 = 10.0;
 // ---------------------------------------------------------------------------
 
 static RE_FLOAT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+\.?").unwrap());
+    Lazy::new(|| Regex::new(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?").unwrap());
 /// "[file /path/foo.cpp, line 123]" — an ORCA error signature.
 static RE_FILE_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\[file\s+[^,\]]+,\s*line\s*\d+\]").unwrap());
@@ -40,9 +40,9 @@ static RE_PLAIN_FLOAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[-+]?\d+\.\d+").u
 /// word (e.g. "Coordinate 1.2") matches the bare-"E" alternative
 /// case-insensitively and steals the wrong number as the energy.
 static RE_ENERGY_LABEL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(?:Energy|E)\b[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)\b(?:Energy|E)\b[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)").unwrap());
 static RE_DIST_LABEL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?\d*\.\d+|[-+]?\d+\.?)")
+    Regex::new(r"(?i)(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
         .unwrap()
 });
 static RE_STATE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)STATE\s+(\d+)\s*:").unwrap());
@@ -194,6 +194,7 @@ struct FreqEntry {
     ir: f64,
     raman: f64,
     vector: Vec<[f64; 3]>,
+    dipole_deriv: Option<[f64; 3]>,
 }
 
 #[derive(Default, Clone)]
@@ -700,7 +701,7 @@ impl<'a> OrcaRustParser<'a> {
                     })
                     .unwrap_or(self.len());
 
-                let mut en = 0.0f64;
+                let mut en = f64::NAN;
                 let mut conv_info = HashMap::new();
                 let mut coord_val: Option<f64> = None;
 
@@ -782,7 +783,7 @@ impl<'a> OrcaRustParser<'a> {
                     })
                     .unwrap_or(self.len());
 
-                let mut en = 0.0f64;
+                let mut en = f64::NAN;
                 let mut conv_info = HashMap::new();
 
                 for k in i..next_marker {
@@ -939,7 +940,7 @@ impl<'a> OrcaRustParser<'a> {
 
         // 2. IR intensities
         let mut ir_start: Option<usize> = None;
-        for (i, &line) in self.lines.iter().enumerate() {
+        for (i, &line) in self.lines.iter().enumerate().skip(freq_start.unwrap_or(0)) {
             if line.to_uppercase().contains("IR SPECTRUM") {
                 ir_start = Some(i);
             }
@@ -964,6 +965,14 @@ impl<'a> OrcaRustParser<'a> {
                         let idx = idx as usize;
                         if idx < data.frequencies.len() {
                             data.frequencies[idx].ir = inten;
+                            if let (Some(left), Some(right)) = (line.find('('), line.find(')')) {
+                                if left < right {
+                                    let values: Option<Vec<f64>> = line[left + 1..right].split_whitespace().map(parse_f64).collect();
+                                    if let Some(v) = values {
+                                        if v.len() == 3 { data.frequencies[idx].dipole_deriv = Some([v[0], v[1], v[2]]); }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -973,7 +982,7 @@ impl<'a> OrcaRustParser<'a> {
 
         // 3. Raman activities
         let mut raman_start: Option<usize> = None;
-        for (i, &line) in self.lines.iter().enumerate() {
+        for (i, &line) in self.lines.iter().enumerate().skip(freq_start.unwrap_or(0)) {
             if line.to_uppercase().contains("RAMAN SPECTRUM") {
                 raman_start = Some(i);
             }
@@ -1007,7 +1016,7 @@ impl<'a> OrcaRustParser<'a> {
 
         // 4. Normal modes
         let mut modes_start: Option<usize> = None;
-        for (i, &line) in self.lines.iter().enumerate() {
+        for (i, &line) in self.lines.iter().enumerate().skip(freq_start.unwrap_or(0)) {
             if line.to_uppercase().contains("NORMAL MODES") {
                 modes_start = Some(i);
             }
@@ -1168,24 +1177,30 @@ impl<'a> OrcaRustParser<'a> {
             let next_has_dashes = i + 1 < self.len() && self.get(i + 1).contains("---");
             if uu.contains("ORBITAL ENERGIES") && next_has_dashes {
                 start_indices.push((i, "restricted".to_string()));
-            } else if uu.contains("SPIN UP ORBITALS") && next_has_dashes {
+            } else if uu.contains("SPIN UP ORBITALS") {
                 start_indices.push((i, "alpha".to_string()));
-            } else if uu.contains("SPIN DOWN ORBITALS") && next_has_dashes {
+            } else if uu.contains("SPIN DOWN ORBITALS") {
                 start_indices.push((i, "beta".to_string()));
             }
         }
 
+        if let Some(last) = start_indices.iter().filter(|(_, spin)| spin == "restricted").map(|(i, _)| *i).max() {
+            start_indices.retain(|(i, _)| *i >= last);
+        }
         // Keep last occurrence of each spin type
         let mut final_map: HashMap<String, usize> = HashMap::new();
         for (idx, spin) in start_indices {
             final_map.insert(spin, idx);
+        }
+        if final_map.contains_key("alpha") || final_map.contains_key("beta") {
+            final_map.remove("restricted");
         }
         let mut filtered: Vec<(usize, String)> =
             final_map.into_iter().map(|(s, i)| (i, s)).collect();
         filtered.sort_by_key(|(i, _)| *i);
 
         for (start_idx, spin) in filtered {
-            let mut curr = start_idx + 2;
+            let mut curr = start_idx + 1;
             // Find column header
             while curr < self.len() && curr < start_idx + 10 {
                 let line = self.get(curr);
@@ -1203,6 +1218,7 @@ impl<'a> OrcaRustParser<'a> {
                     || line.contains("---")
                     || line.contains("****")
                     || line.contains("MULLIKEN")
+                    || line.contains("ORBITALS")
                 {
                     break;
                 }
@@ -1252,6 +1268,9 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
 
+        if let Some(last) = start_indices.iter().filter(|(_, spin)| spin == "restricted").map(|(i, _)| *i).max() {
+            start_indices.retain(|(i, _)| *i >= last);
+        }
         // Keep last occurrence per spin type
         let mut final_map: HashMap<String, usize> = HashMap::new();
         for (idx, spin) in start_indices {
@@ -1377,8 +1396,10 @@ impl<'a> OrcaRustParser<'a> {
                             continue;
                         };
 
-                    if val_strs.len() == current_mos.len() {
-                        for (k, v_str) in val_strs.iter().enumerate() {
+                    let joined = val_strs.join(" ");
+                    let values: Vec<&str> = RE_FLOAT.find_iter(&joined).map(|m| m.as_str()).collect();
+                    if values.len() == current_mos.len() {
+                        for (k, v_str) in values.iter().enumerate() {
                             if let Some(val) = parse_f64(v_str) {
                                 let mo_idx = current_mos[k];
                                 let key = format!("{}_{}", mo_idx, current_spin);
@@ -1426,14 +1447,14 @@ impl<'a> OrcaRustParser<'a> {
                 mayer_start = i as i64;
             } else if uu.contains("NATURAL POPULATIONS") {
                 nbo_start = i as i64;
-            } else if uu.contains("CHELPG ATOMIC CHARGES") {
+            } else if (uu.contains("CHELPG ATOMIC CHARGES") || uu.contains("CHELPG CHARGES")) && !uu.contains("GENERATION") && !uu.contains("CALCULATED") {
                 chelpg_start = i as i64;
             } else if uu.contains("MERZ-KOLLMAN ATOMIC CHARGES") || uu.contains("MK ATOMIC CHARGES")
             {
                 mk_start = i as i64;
             } else if uu.contains("MBIS ANALYSIS") {
                 mbis_start = i as i64;
-            } else if uu.contains("RESP ATOMIC CHARGES") {
+            } else if (uu.contains("RESP ATOMIC CHARGES") || uu.contains("RESP CHARGES")) && !uu.contains("GENERATION") && !uu.contains("CALCULATED") {
                 resp_start = i as i64;
             } else if uu.contains("FRONTIER MOLECULAR ORBITAL POPULATION ANALYSIS") {
                 fmo_start = i as i64;
@@ -1988,8 +2009,17 @@ impl<'a> OrcaRustParser<'a> {
         let mut states_dict: HashMap<i32, TddftState> = HashMap::new();
 
         // Pass 1: Detailed excited state blocks
+        let header_re = Regex::new(r"^[A-Z0-9/\-\s]*EXCITED STATES(\s*\((SINGLETS|TRIPLETS)\))?$").unwrap();
+        let run_start = self.lines.iter().enumerate().filter(|(_, line)| header_re.is_match(line.trim()) && !line.contains("TRIPLETS")).map(|(i, _)| i).last().unwrap_or(0);
+        let mut in_triplets = false;
         let mut current_state_id: i32 = -1;
-        for &line in &self.lines {
+        for &line in &self.lines[run_start..] {
+            if header_re.is_match(line.trim()) {
+                in_triplets = line.contains("TRIPLETS");
+                current_state_id = -1;
+                continue;
+            }
+            if in_triplets { continue; }
             let line_upper = line.to_uppercase();
 
             if let Some(cap) = RE_STATE_HEADER.captures(&line_upper) {
@@ -2137,19 +2167,22 @@ impl<'a> OrcaRustParser<'a> {
                             "rot_vel" => entry.rot_vel = strength,
                             _ => {}
                         }
-                        if entry.energy_ev == 0.0 {
-                            entry.energy_ev = parse_f64(parts[1]).unwrap_or(0.0);
-                        }
-                        if entry.energy_nm == 0.0 {
-                            entry.energy_nm = parse_f64(parts[2]).unwrap_or(0.0);
-                        }
+                        let col1 = parse_f64(parts[1]).unwrap_or(0.0);
+                        let nm = parse_f64(parts[2]).unwrap_or(0.0);
+                        let as_ev = if nm > 0.0 { 1239.84193 / nm } else { 0.0 };
+                        let as_cm = if nm > 0.0 { 1.0e7 / nm } else { 0.0 };
+                        if nm > 0.0 && (col1 - as_cm).abs() < (col1 - as_ev).abs() {
+                            if entry.energy_cm == 0.0 { entry.energy_cm = col1; }
+                            if entry.energy_ev == 0.0 { entry.energy_ev = as_ev; }
+                        } else if entry.energy_ev == 0.0 { entry.energy_ev = col1; }
+                        if entry.energy_nm == 0.0 { entry.energy_nm = nm; }
                     }
                 }
                 curr += 1;
             }
         };
 
-        for (i, &line) in self.lines.iter().enumerate() {
+        for (i, &line) in self.lines.iter().enumerate().skip(run_start) {
             let line_upper = line.to_uppercase();
             if line_upper.contains("ABSORPTION SPECTRUM") {
                 if line_upper.contains("ELECTRIC DIPOLE") {
@@ -2200,7 +2233,6 @@ impl<'a> OrcaRustParser<'a> {
                 .contains("CHEMICAL SHIELDING SUMMARY (PPM)")
             {
                 summary_start = i as i64;
-                break;
             }
         }
 
@@ -2333,10 +2365,11 @@ impl<'a> OrcaRustParser<'a> {
     // parse_basis_set
     // -----------------------------------------------------------------------
     fn parse_basis_set(&self, data: &mut ParsedData) {
+        data.basis_set_shells.clear();
         let start_idx = match self
             .lines
             .iter()
-            .position(|l| l.contains("BASIS SET IN INPUT FORMAT"))
+            .rposition(|l| l.trim() == "BASIS SET IN INPUT FORMAT")
         {
             Some(i) => i,
             None => return,
@@ -2477,10 +2510,8 @@ impl<'a> OrcaRustParser<'a> {
                     current_step_label = "Opt Cycle".to_string();
                 }
             } else if uu.contains("SCAN STEP") {
-                current_step_label = line
-                    .split_whitespace()
-                    .last()
-                    .map(|s| format!("Scan Step {}", s))
+                current_step_label = RE_SCAN_STEP.captures(&uu)
+                    .map(|cap| format!("Scan Step {}", &cap[1]))
                     .unwrap_or_else(|| "Scan Step".to_string());
             } else if uu.contains("ORCA PROPERTIES") || uu.contains("ORCA PROPERTY") {
                 current_step_label = "Property/Final".to_string();
@@ -2821,6 +2852,7 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
             vl.append(row)?;
         }
         fd.set_item("vector", vl)?;
+        if let Some(v) = f.dipole_deriv { fd.set_item("dipole_deriv", (v[0], v[1], v[2]))?; }
         freq_list.append(fd)?;
     }
     d.set_item("frequencies", freq_list)?;
@@ -3020,7 +3052,7 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
         sd.set_item("type", s.step_type.clone())?;
         sd.set_item("scan_step_id", s.scan_step_id.into_py(py))?;
         sd.set_item("step", s.step)?;
-        sd.set_item("energy", s.energy)?;
+        if s.energy.is_nan() { sd.set_item("energy", py.None())?; } else { sd.set_item("energy", s.energy)?; }
         sd.set_item("scan_coord", s.scan_coord.into_py(py))?;
         sd.set_item("dist", s.dist.into_py(py))?;
         let al = PyList::new_bound(py, &s.atoms);

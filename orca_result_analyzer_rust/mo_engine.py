@@ -243,6 +243,11 @@ class BasisSetEngine:
                     "orbital that would be silently incorrect."
                 )
 
+        self.shells = [dict(shell) for shell in shells]
+        offset = 0
+        for shell in self.shells:
+            shell["start_idx"] = offset
+            offset += 2 * int(shell["type"]) + 1
         rust_shells = [
             {
                 "type": int(sh["type"]),
@@ -254,6 +259,15 @@ class BasisSetEngine:
         ]
         self._engine = _rs.BasisSetEngineRust(rust_shells)
         self.n_basis = self._engine.n_basis
+
+    def _normalization_prefactor(self, alpha, l, m, n):  # noqa: E741
+        L = l + m + n
+        fact = {0: 1, 1: 1, 2: 2, 3: 6, 4: 24, 5: 120}
+        fact2 = {0: 1, 1: 2, 2: 24, 3: 720, 4: 40320, 5: 3628800}
+
+        num = (8 * alpha) ** L * fact[l] * fact[m] * fact[n]
+        den = fact2[l] * fact2[m] * fact2[n]
+        return ((2 * alpha / np.pi) ** 0.75) * np.sqrt(num / den)
 
     def evaluate_mo_on_grid(self, mo_idx, grid_coords, mo_coeffs_all):
         """

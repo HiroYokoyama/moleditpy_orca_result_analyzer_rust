@@ -124,7 +124,7 @@ def main():
         platform_tag = "unknown"
 
     # Read plugin version from __init__.py by parsing the text, NOT by importing
-    # it — __init__.py imports PyQt6, which is absent in the build environment
+    # it — __init__.py imports PySide6, which is absent in the build environment
     # (that made the zip name fall back to "unknown").
     import re
     version_tag = "unknown"
@@ -144,13 +144,17 @@ def main():
     pkg_name = os.path.basename(PKG_DIR)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(PKG_DIR):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            dirs[:] = [d for d in dirs if d not in {"__pycache__", "logs"}]
             for fname in files:
-                if fname.endswith(".pyc"):
+                if fname.endswith(".pyc") or fname == "settings.json":
                     continue
                 full    = os.path.join(root, fname)
                 arcname = os.path.join(pkg_name, os.path.relpath(full, PKG_DIR))
                 zf.write(full, arcname)
+        for notice in ("LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/LGPL-3.0.txt"):
+            path = os.path.join(ROOT, notice)
+            if os.path.isfile(path):
+                zf.write(path, os.path.join(pkg_name, notice))
     print(f"Plugin zip:  {zip_name}  ->  build/")
 
     print("\nDone.")

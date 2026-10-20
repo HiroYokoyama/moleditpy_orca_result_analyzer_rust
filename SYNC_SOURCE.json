@@ -43,10 +43,12 @@
     "test_bond_and_vis.py",
     "test_charge_analysis.py",
     "test_chemistry_fixes.py",
+    "test_cube_and_mo.py",
     "test_dialog_extras.py",
     "test_dipole_analysis.py",
     "test_energy_diag.py",
     "test_energy_property_dialogs.py",
+    "test_exception_policy.py",
     "test_force_analysis.py",
     "test_force_dialogs.py",
     "test_freq_analysis.py",
@@ -69,6 +71,7 @@
     "test_mo_basis_agreement.py",
     "test_mo_compare.py",
     "test_mo_dialog.py",
+    "test_mo_engine.py",
     "test_mo_overlap.py",
     "test_mo_selection.py",
     "test_mo_visualisation.py",
@@ -83,6 +86,14 @@
     "test_nmr_references.py",
     "test_nmr_split.py",
     "test_nmr_sync.py",
+    "test_parser.py",
+    "test_parser_charges.py",
+    "test_parser_extended.py",
+    "test_parser_import_compatibility.py",
+    "test_parser_mixin_gaps.py",
+    "test_parser_samples.py",
+    "test_parser_split.py",
+    "test_parser_xyz_regressions.py",
     "test_plugin_integration.py",
     "test_reject_close.py",
     "test_reject_close_behavior.py",
@@ -104,5 +115,11 @@
     "parser.py",
     "mo_engine.py"
   ],
-  "python_range": ">=3.9,<3.14"
+  "python_range": ">=3.9,<3.14",
+  "shared_parser_mixins": [
+    "parser_structure.py",
+    "parser_electronic.py",
+    "parser_properties.py",
+    "parser_spectra.py"
+  ]
 }

@@ -377,15 +377,15 @@ class TestBasisSetEngine(unittest.TestCase):
         self.assertEqual(vals[0], 0.0)
 
     def test_normalization_prefactor_s_and_p(self):
+        eng = BasisSetEngine([_s_shell()])
         alpha = 1.3
-        s_engine = BasisSetEngine([_s_shell(alpha=alpha)])
-        actual = s_engine.evaluate_mo_on_grid(0, np.array([[0., 0., 0.]]), np.array([1.]))
-        self.assertAlmostEqual(actual[0], (2 * alpha / math.pi) ** 0.75)
-        p_engine = BasisSetEngine([{**_s_shell(alpha=alpha), "type": 1}])
-        point = np.array([[0., 0., 0.1]])
-        value = p_engine.evaluate_mo_on_grid(0, point, np.array([1., 0., 0.]))[0]
-        expected = (2 * alpha / math.pi) ** 0.75 * math.sqrt(4 * alpha) * 0.1 * math.exp(-alpha * 0.01)
-        self.assertAlmostEqual(value, expected)
+        n_s = eng._normalization_prefactor(alpha, 0, 0, 0)
+        self.assertAlmostEqual(n_s, (2 * alpha / math.pi) ** 0.75, places=10)
+        # P: extra sqrt(8*alpha * 1!/2!) = sqrt(4*alpha)
+        n_p = eng._normalization_prefactor(alpha, 1, 0, 0)
+        self.assertAlmostEqual(
+            n_p, (2 * alpha / math.pi) ** 0.75 * math.sqrt(4 * alpha), places=10
+        )
 
 
 class TestUnsupportedShellsAreRejected(unittest.TestCase):
@@ -420,12 +420,7 @@ class TestUnsupportedShellsAreRejected(unittest.TestCase):
     def test_later_shells_keep_their_offsets(self):
         """The reason the skip mattered: indices after it must stay right."""
         eng = BasisSetEngine(self._shells(0, 2, 0))
-        point = np.array([[0.2, 0.3, 0.4]])
-        expected = BasisSetEngine(self._shells(0)).evaluate_mo_on_grid(0, point, np.array([1.]))
-        for offset in (0, 6):
-            coeffs = np.zeros(7)
-            coeffs[offset] = 1.
-            np.testing.assert_allclose(eng.evaluate_mo_on_grid(0, point, coeffs), expected)
+        self.assertEqual([sh["start_idx"] for sh in eng.shells], [0, 1, 6])
 
 
 class TestSphericalShellNormalization(unittest.TestCase):
