@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: HiroYokoyama/moleditpy_orca_result_analyzer_plugin
-          ref: ee2ff6ec6ee7bc7557226b0d9f52049457101f6f
+          ref: 6dc0d51035981a3dc4834aed0370527e14ced20c
           path: canonical-python
           persist-credentials: false
       - run: python scripts/check_python_sync.py --source canonical-python
