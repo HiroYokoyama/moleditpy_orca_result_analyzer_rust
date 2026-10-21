@@ -1,6 +1,6 @@
 [package]
 name        = "orca-mo-rs"
-version     = "5.0.1"
+version     = "5.0.2"
 edition     = "2021"
 description = "Rust-powered GTO basis set evaluation for MO cube generation"
 authors     = ["HiroYokoyama"]

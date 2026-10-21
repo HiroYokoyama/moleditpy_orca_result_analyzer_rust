@@ -1,9 +1,10 @@
 {
   "repository": "https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin",
-  "commit": "ee2ff6ec6ee7bc7557226b0d9f52049457101f6f",
-  "plugin_version": "5.0.1",
+  "commit": "6dc0d51035981a3dc4834aed0370527e14ced20c",
+  "plugin_version": "5.0.2",
   "shared_modules": [
     "__init__.py",
+    "_qt_callbacks.py",
     "bond_analysis.py",
     "charge_analysis.py",
     "dipole_analysis.py",
@@ -95,6 +96,7 @@
     "test_parser_split.py",
     "test_parser_xyz_regressions.py",
     "test_plugin_integration.py",
+    "test_qt_callbacks.py",
     "test_reject_close.py",
     "test_reject_close_behavior.py",
     "test_remaining_paths.py",

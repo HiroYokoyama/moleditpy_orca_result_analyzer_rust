@@ -1,5 +1,7 @@
 """MO Analyzer dialog: orbital list, cube generation/visualization and export."""
 
+from ._qt_callbacks import connect_queued
+
 import csv
 import os
 import tempfile
@@ -995,7 +997,7 @@ class MODialog(QDialog):
         )
         worker = self.worker
         _RUNNING_WORKERS.add(worker)
-        worker.finished.connect(lambda: _RUNNING_WORKERS.discard(worker))
+        connect_queued(worker.finished, lambda: _RUNNING_WORKERS.discard(worker), cleanup=(worker.finished,))
 
         self.worker.progress_sig.connect(self.progress_dialog.setValue)
 
@@ -1040,7 +1042,7 @@ class MODialog(QDialog):
             # Trigger Next
             self.process_generation_queue()
 
-        self.worker.finished_sig.connect(on_finished)
+        connect_queued(self.worker.finished_sig, on_finished, self, (bool, str), cleanup=(self.worker.finished,))
         self.worker.start()
 
     def pick_color(self, which):

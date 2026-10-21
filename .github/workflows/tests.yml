@@ -1,7 +1,7 @@
 name: Tests
 
 # Builds the Rust extensions in-place (build.py) and runs the headless test
-# suite. PySide6/pytest-qt are intentionally NOT installed: the tests stub Qt at
+# suite. "PySide6<6.12"/pytest-qt are intentionally NOT installed: the tests stub Qt at
 # module level, and a real binding would defeat those stubs. numpy/matplotlib
 # are real (parser math / spectrum widgets).
 
