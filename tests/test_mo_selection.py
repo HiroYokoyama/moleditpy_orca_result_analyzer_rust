@@ -30,6 +30,13 @@ def _mos():
 
 class _MOCase(unittest.TestCase):
     def setUp(self):
+        # Queue semantics are covered by the native Qt subprocess regressions.
+        def connect_double(signal, callback, owner=None, signature=(), cleanup=()):
+            signal.connect(callback)
+            return callback
+        callbacks = patch.object(M, "connect_queued", connect_double)
+        callbacks.start()
+        self.addCleanup(callbacks.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = self._tmp.name
         self.addCleanup(self._tmp.cleanup)

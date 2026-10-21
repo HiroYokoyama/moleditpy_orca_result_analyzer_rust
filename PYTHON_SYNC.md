@@ -1,8 +1,8 @@
 # Python版との同期範囲
 
-同期元: [ORCA Result Analyzer 5.0.1](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/ee2ff6ec6ee7bc7557226b0d9f52049457101f6f)
+同期元: [ORCA Result Analyzer 5.0.2](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/6dc0d51035981a3dc4834aed0370527e14ced20c)
 
-コミット: `ee2ff6ec6ee7bc7557226b0d9f52049457101f6f`。
+コミット: `6dc0d51035981a3dc4834aed0370527e14ced20c`。
 「同一」は改行コードと `orca_result_analyzer` → `orca_result_analyzer_rust`
 のパッケージ名置換を除いた全文一致を意味します。UIや解析の変更は原則として
 Python版で行い、共通ファイルをコピーして維持します。
@@ -12,6 +12,7 @@ Python版で行い、共通ファイルをコピーして維持します。
 | ファイル（orca_result_analyzer_rust/） | 区分 | 差分・扱い |
 | --- | --- | --- |
 | `__init__.py` | 変更あり | メタデータの対応Python範囲のみ `<3.14`。GUI・登録処理は同一。 |
+| `_qt_callbacks.py` | 同一 | QObject SlotによるGUIスレッドへの配送。 |
 | `bond_analysis.py` | 同一 | パッケージ名の置換を除き全文一致。 |
 | `charge_analysis.py` | 同一 | パッケージ名の置換を除き全文一致。 |
 | `dipole_analysis.py` | 同一 | パッケージ名の置換を除き全文一致。 |
@@ -57,7 +58,7 @@ Python版で行い、共通ファイルをコピーして維持します。
   `CubeWriter`、`CalcWorker`、`read_generation_settings`、`UnsupportedBasisError`
   はPython版からコピーします。`shells`・`start_idx` と正規化ヘルパーも公開API互換のため
   維持し、実際の格子評価はRustで検証します。
-- `__init__.py`: 機能バージョンはPython版と同じ5.0.1です。現行PyO3ツールチェーンに
+- `__init__.py`: 機能バージョンはPython版と同じ5.0.2です。現行PyO3ツールチェーンに
   合わせ、Rust版の対応Python範囲は3.9–3.13です。
 
 ## README用画像
@@ -75,9 +76,9 @@ Python版で行い、共通ファイルをコピーして維持します。
 
 ## テストとデータ
 
-Python版の全73テストモジュール（2,459個の `test_*` 関数）をコピーしています。
+Python版の全74テストモジュールをコピーしています。
 全テストコードはパッケージ名の置換以外は同一です。補助Pythonファイルとサンプル出力・
-cube・NOTICEを含む全101ファイルを保持し、Rust固有のテストも追加で残します。
+cube・NOTICEを含む全102ファイルを保持し、Rust固有のテストも追加で残します。
 `tests/README.md` は同期元の説明、`tests/TESTS.md` はRust版の実行方法です。
 
 Python版のテストを弱めたり、Rust版に合わない数値検証を削除したりせず、互換APIと
@@ -90,7 +91,7 @@ Python版のテストを弱めたり、Rust版に合わない数値検証を削�
   科学表記、SCFスキャン番号、未完了サイクルのエネルギー、CHELPG/RESP見出しを同期。
 - `crates/orca_mo_rs/src/mo_engine.rs`: 数値計算の実装を維持。共有の球面調和関数・
   正規化・直交性・節の角度・実MO cube比較テストを適用します。
-- Rust crateとプラグインのバージョンは今回5.0.1に揃えています。
+- Rust crateとプラグインのバージョンは今回5.0.2に揃えています。
 
 ## 同期チェック
 
