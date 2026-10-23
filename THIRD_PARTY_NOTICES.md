@@ -2,7 +2,7 @@
 
 The shared Python UI, analysis modules, parser compatibility mixins and tests
 were synchronized from HiroYokoyama/moleditpy_orca_result_analyzer_plugin at
-commit ee2ff6ec6ee7bc7557226b0d9f52049457101f6f (plugin 5.0.1).
+commit d7f79374829da98c2f4c84dc6811504d0f5fc164 (plugin 5.0.3).
 Copyright: Hiromichi Yokoyama / HiroYokoyama and the existing project notices.
 That upstream source is available under LGPL-3.0-or-later; retain the included
 licenses/LGPL-3.0.txt and GPL text in LICENSE with these copies.

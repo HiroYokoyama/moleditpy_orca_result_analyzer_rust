@@ -25,7 +25,8 @@ Rust engine local.
 **Version:** `orca_result_analyzer_rust/__init__.py` `PLUGIN_VERSION` mirrors the
 Python plugin's version (same functionality → same number). The
 `pyproject.toml` / `Cargo.toml` versions are the build-artifact versions and are
-managed separately; this 5.0.1 synchronization aligns them with the plugin version.
+aligned with the plugin version at 5.0.3. Keep both crate manifests, Cargo.lock
+and the project version consistent when releasing.
 The supported native wheel range is Python 3.9–3.13.
 NBO/spin sections and helper APIs use shared Python mixins; bulk parsing and MO
 grid evaluation remain native. Native-pass cancellation takes effect after it returns.
@@ -102,3 +103,20 @@ Python test over, rewrite the package name `orca_result_analyzer` →
 
 Like all MoleditPy plugins, this validates against the `PluginContext` API in
 `../python_molecular_editor/moleditpy/src/moleditpy/plugins/plugin_interface.py`.
+
+
+## Synchronization and release checks
+
+`SYNC_SOURCE.json` pins the canonical Python release commit. Update the shared
+modules/tests and the `sync-check` workflow's checkout ref together, then run
+`scripts/check_python_sync.py` against that exact revision. Keep native-specific
+regressions in `tests/test_native_result_audit.py` or other local test modules;
+do not diverge copied shared tests to hide native parsing differences.
+
+Before release, build both native extensions and run the complete suite with
+`run_tests.py`, including the canonical audit regressions and native malformed
+input checks. Passing Python helper tests alone does not validate the native
+bulk parser. The tag release workflow builds the full OS/Python ZIP matrix;
+verify all assets and included license/provenance notices after it completes.
+Python 3.9 Linux jobs use Ubuntu 24.04 because setup-python has no 3.9 build for
+Ubuntu 26.04. Retain the other OS/Python combinations.

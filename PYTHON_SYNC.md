@@ -1,8 +1,8 @@
 # Python版との同期範囲
 
-同期元: [ORCA Result Analyzer 5.0.2](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/6dc0d51035981a3dc4834aed0370527e14ced20c)
+同期元: [ORCA Result Analyzer 5.0.3](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/d7f79374829da98c2f4c84dc6811504d0f5fc164)
 
-コミット: `6dc0d51035981a3dc4834aed0370527e14ced20c`。
+コミット: `d7f79374829da98c2f4c84dc6811504d0f5fc164`。
 「同一」は改行コードと `orca_result_analyzer` → `orca_result_analyzer_rust`
 のパッケージ名置換を除いた全文一致を意味します。UIや解析の変更は原則として
 Python版で行い、共通ファイルをコピーして維持します。
