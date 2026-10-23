@@ -406,7 +406,13 @@ class FreqSpectrumWindow(QWidget):
             self, "Save Graph", default_path, "Images (*.png)"
         )
         if path:
-            self.spectrum.save_png(path)
+            try:
+                self.spectrum.save_png(path)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logging.warning("Frequency spectrum: image export failed: %s", exc)
+                QMessageBox.critical(
+                    self, "Export Error", f"Could not save image:\n{exc}"
+                )
 
     def save_csv(self):
         """Prompt for a path and save the plotted spectrum curve as CSV."""

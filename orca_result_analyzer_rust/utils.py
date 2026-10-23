@@ -245,7 +245,11 @@ def _host_context(owner):
 
 def notify(owner, message, timeout=3000):
     """Show *message* in the host status bar, else log it. Never raises."""
-    context = _host_context(owner)
+    try:
+        context = _host_context(owner)
+    except (AttributeError, TypeError, RuntimeError) as exc:
+        logging.debug("Could not resolve the status-message owner: %s", exc)
+        context = None
     if context is not None:
         try:
             context.show_status_message(message, timeout)

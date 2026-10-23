@@ -177,15 +177,18 @@ class _PropertyParsingMixin:
             ("E(CCSD(T))", "E(CCSD(T))", False),
             ("T1 diagnostic", "T1 diagnostic", True),
         ]
-        float_re = re.compile(r"[-+]?\d+\.\d+")
+        float_re = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][-+]?\d+)?")
         found = {}
         for line in self.lines:
             for sub, label, dimensionless in specs:
                 if sub in line:
-                    nums = float_re.findall(line)
+                    nums = float_re.findall(line.split(sub, 1)[1])
                     if nums:
                         try:
-                            found[label] = (float(nums[-1]), dimensionless)
+                            found[label] = (
+                                float(nums[-1].replace("D", "E").replace("d", "e")),
+                                dimensionless,
+                            )
                         except ValueError:
                             logging.debug(
                                 "Unparseable energy component value in line: %r",
@@ -508,6 +511,19 @@ class _PropertyParsingMixin:
             curr = start_idx + header_lines
             while curr < len(self.lines):
                 line = self.lines[curr].strip()
+                if any(
+                    marker in line.upper()
+                    for marker in (
+                        "ATOMIC CHARGES",
+                        "HIRSHFELD ANALYSIS",
+                        "MBIS ANALYSIS",
+                        "MAYER POPULATION ANALYSIS",
+                        "NATURAL POPULATIONS",
+                        "CHELPG CHARGES",
+                        "RESP CHARGES",
+                    )
+                ):
+                    break
                 if not line or "---" in line or "Sum of" in line:
                     if res:
                         break
@@ -515,7 +531,7 @@ class _PropertyParsingMixin:
                     continue
 
                 parts = line.split()
-                if len(parts) >= 3:
+                if len(parts) >= 2:
                     try:
                         # Handle merged "0C" case
                         first_part = parts[0]
@@ -523,18 +539,17 @@ class _PropertyParsingMixin:
                         if match:
                             idx_str = match.group(1)
                             sym = match.group(2)
+                            values = parts[1:]
                         else:
                             idx_str = first_part.strip(":")
                             # If "0 C", sym is parts[1]
                             sym = parts[1].strip(":")
+                            values = parts[2:]
 
-                        if hirshfeld or mbis:
-                            val = float(parts[2])  # 0 C Charge Spin
-                        else:
-                            # 0 C : -1.23 or 0 C -1.23
-                            val = (
-                                float(parts[3]) if parts[2] == ":" else float(parts[2])
-                            )
+                        if values and values[0] == ":":
+                            values = values[1:]
+
+                        val = float(values[0])
 
                         atom_data = {
                             "atom_idx": int(idx_str),
@@ -544,14 +559,14 @@ class _PropertyParsingMixin:
 
                         # Capture spin if available (Hirshfeld/MBIS)
                         if hirshfeld:
-                            if len(parts) >= 4:
-                                atom_data["spin"] = float(parts[3])
+                            if len(values) >= 2:
+                                atom_data["spin"] = float(values[1])
                         elif mbis:
-                            if len(parts) >= 4:
+                            if len(values) >= 2:
                                 # ATOM CHARGE POPULATION [SPIN]
-                                atom_data["population"] = float(parts[3])
-                            if len(parts) >= 5:
-                                atom_data["spin"] = float(parts[4])
+                                atom_data["population"] = float(values[1])
+                            if len(values) >= 3:
+                                atom_data["spin"] = float(values[2])
 
                         res.append(atom_data)
                     except (

@@ -205,6 +205,7 @@ class MOCompareDialog(QDialog):
         self.slots = []
         # Guards the live-redraw slots while the dialog sets widgets itself.
         self._ready = False
+        self._is_closing = False
         self._suspend = 0
         self.opened_from_selection = False
         self.setup_ui()
@@ -557,7 +558,7 @@ class MOCompareDialog(QDialog):
 
     def render_all(self):
         """Draw every enabled slot's isosurfaces (skipping any missing cube)."""
-        if self._suspend:
+        if getattr(self, "_is_closing", False) is True or self._suspend:
             return
         if not CubeVisualizer:
             QMessageBox.warning(
@@ -668,6 +669,7 @@ class MOCompareDialog(QDialog):
 
     def closeEvent(self, event):
         """Save settings and remove every slot's 3D actors before closing."""
+        self._is_closing = True
         self.save_settings()
         for slot in self.slots:
             self._remove_actors(slot.prefix)

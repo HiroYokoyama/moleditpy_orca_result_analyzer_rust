@@ -36,7 +36,7 @@ def calculate_arrow_shifts(items, val_to_y, threshold=15, distance=20):
     for idx in range(1, len(items)):
         y_prev = val_to_y(items[idx - 1][1])
         y_curr = val_to_y(items[idx][1])
-        if (y_curr - y_prev) < threshold:
+        if abs(y_curr - y_prev) < threshold:
             current_cluster.append(idx)
         else:
             clusters.append(current_cluster)
@@ -394,7 +394,8 @@ class EnergyDiagramDialog(QDialog):
             if base:
                 exact_patterns = [
                     p.replace("*_MO_", f"{glob.escape(base)}_MO_")
-                    for p in patterns if p.startswith("*_MO_")
+                    for p in patterns
+                    if p.startswith("*_MO_")
                 ]
                 # Legacy names have provenance only inside this job's cube folder.
                 search_patterns = exact_patterns

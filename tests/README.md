@@ -22,7 +22,7 @@ segfaults that do not reproduce in CI.
 Coverage (autoload is off, so the plugin must be named explicitly):
 
 ```bash
-python run_tests.py -p pytest_cov --cov=orca_result_analyzer_rust --cov-report=term-missing
+python run_tests.py -p pytest_cov --cov=orca_result_analyzer --cov-report=term-missing
 ```
 
 The target is to keep coverage above 80%. CI reports it on every run but does
@@ -130,7 +130,7 @@ Real-context mode activates when the repos are siblings:
 
 ```
 <parent>/
-    moleditpy_orca_result_analyzer_rust_plugin/   ← this plugin
+    moleditpy_orca_result_analyzer_plugin/   ← this plugin
     python_molecular_editor/                 ← main app
 ```
 

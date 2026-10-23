@@ -650,7 +650,13 @@ class TDDFTDialog(QDialog):
             self, "Save Graph", default_path, "Images (*.png)"
         )
         if path:
-            self.spectrum.save_png(path)
+            try:
+                self.spectrum.save_png(path)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logging.warning("TD-DFT spectrum: image export failed: %s", exc)
+                QMessageBox.critical(
+                    self, "Export Error", f"Could not save image:\n{exc}"
+                )
 
     def save_csv(self):
         """Prompt for a path and export the broadened curve data to CSV."""

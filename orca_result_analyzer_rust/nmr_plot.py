@@ -45,6 +45,7 @@ def _simulate_lineshape(specs, x_grid, width_hz, cancel):
             y += (scale * amp * hw2 / (hw2 + (x_grid - v0) ** 2)).sum(axis=0)
     return y
 
+
 # Import RDKit for VDW radii calculation
 try:
     from rdkit import Chem
@@ -79,6 +80,7 @@ class _NMRPlotMixin:
         old_metadata = getattr(self, "peaks_metadata", None) or []
         self.peaks_metadata = self._get_current_peaks()
         self._remap_selection_to_new_peaks(old_metadata)
+        self.current_shifts = [p[0] for p in self.peaks_metadata]
 
         if not self.peaks_metadata:
             ax.text(
@@ -391,7 +393,11 @@ class _NMRPlotMixin:
     def on_peak_click(self, event):
         """Handle clicking on a peak in the spectrum"""
         # Only allow left-click
-        if getattr(event, "button", None) != 1:
+        if (
+            getattr(event, "button", None) != 1
+            or event.inaxes is None
+            or not getattr(self, "current_shifts", None)
+        ):
             return
 
         click_x = event.xdata
@@ -556,6 +562,9 @@ class _NMRPlotMixin:
         peaks_to_simulate = self._get_current_peaks()
 
         if not peaks_to_simulate:
+            self.peaks_metadata = []
+            self.current_shifts = []
+            self.selected_peak_indices.clear()
             ax.text(
                 0.5,
                 0.5,
