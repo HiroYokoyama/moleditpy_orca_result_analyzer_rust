@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import logging
+import math
 
 _XYZ_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
@@ -22,7 +23,10 @@ class _StructureParsingMixin:
         if len(parts) < 4:
             return None
         try:
-            return parts[0], [float(parts[1]), float(parts[2]), float(parts[3])]
+            coords = [float(parts[1]), float(parts[2]), float(parts[3])]
+            if not all(math.isfinite(value) for value in coords):
+                return None
+            return parts[0], coords
         except ValueError:
             logging.debug("Not a coordinate row: %r", line)
             return None
@@ -145,6 +149,9 @@ class _StructureParsingMixin:
                     try:
                         xyz = [float(parts[1]), float(parts[2]), float(parts[3])]
                     except ValueError:
+                        i += 1
+                        continue
+                    if not all(math.isfinite(value) for value in xyz):
                         i += 1
                         continue
                     atoms.append(parts[0])
@@ -306,9 +313,10 @@ class _StructureParsingMixin:
                 c_idx += 1
             return atoms, coords
 
-        def read_coords_from(idx):
+        def read_coords_from(idx, end=None):
             # First "CARTESIAN COORDINATES (ANGSTROEM)" block within 1000 lines.
-            for k in range(idx, min(idx + 1000, len(self.lines))):
+            end = len(self.lines) if end is None else end
+            for k in range(idx, min(idx + 1000, end)):
                 if "CARTESIAN COORDINATES (ANGSTROEM)" in self.lines[k].upper():
                     atoms, coords = read_block_at(k)
                     return atoms, coords, True
@@ -322,7 +330,7 @@ class _StructureParsingMixin:
                 if "CARTESIAN COORDINATES (ANGSTROEM)" in self.lines[k].upper():
                     atoms, coords = read_block_at(k)
                     return atoms, coords, True
-            return read_coords_from(start)
+            return [], [], False
 
         for i, line in enumerate(self.lines):
             uu_line = line.upper()
@@ -639,7 +647,7 @@ class _StructureParsingMixin:
                 # If we still don't have gradients, look slightly further back?
                 # sometimes printed just before? No, usually after.
 
-                atoms, coords, found = read_coords_from(i)
+                atoms, coords, found = read_coords_from(i, next_marker)
                 if found:
                     self.data["scan_steps"].append(
                         {
@@ -750,8 +758,7 @@ class _StructureParsingMixin:
                                     float(parts[4]),
                                     float(parts[5]),
                                 )
-                                # Usually 1-indexed
-                                idx = idx_raw - 1 if idx_raw > 0 else 0
+                                idx = idx_raw
                             else:
                                 curr += 1
                                 continue
@@ -763,7 +770,7 @@ class _StructureParsingMixin:
                                 float(parts[3]),
                                 float(parts[4]),
                             )
-                            idx = idx_raw - 1 if idx_raw > 0 else 0
+                            idx = idx_raw
 
                         block_grads.append(
                             {"atom_idx": idx, "atom_sym": sym, "vector": [vx, vy, vz]}
@@ -783,6 +790,9 @@ class _StructureParsingMixin:
                 curr += 1
 
             if block_grads:
+                offset = 0 if any(g["atom_idx"] == 0 for g in block_grads) else 1
+                for gradient in block_grads:
+                    gradient["atom_idx"] -= offset
                 self.data["all_gradients"].append(
                     {"line": start_idx, "grads": block_grads}
                 )

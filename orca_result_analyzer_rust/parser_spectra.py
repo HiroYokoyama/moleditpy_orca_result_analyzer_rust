@@ -490,6 +490,11 @@ class _SpectraParsingMixin:
                     item["energy_ev"] = 1239.84193 / item["energy_nm"]
                 elif item["energy_cm"] > 0.1:
                     item["energy_ev"] = item["energy_cm"] / 8065.54425
+            if item["energy_ev"] > 0:
+                if item["energy_nm"] <= 0:
+                    item["energy_nm"] = 1239.84193 / item["energy_ev"]
+                if item["energy_cm"] <= 0:
+                    item["energy_cm"] = item["energy_ev"] * 8065.54425
 
         # 2. Filter & Sort
         valid_items = [item for item in all_items if item["energy_ev"] > 0]
@@ -641,6 +646,7 @@ class _SpectraParsingMixin:
     def parse_frequencies(self):
         """Extract vibrational frequencies with their IR/Raman intensities and vectors."""
         self.data["frequencies"] = []
+        frequencies_by_id = {}
 
         # 1. Frequencies
         freq_start = -1
@@ -680,9 +686,10 @@ class _SpectraParsingMixin:
                         # Value is typically index 1 if index 0 ends with colon
                         val_str = parts[1]
                         val = float(val_str)
-                        self.data["frequencies"].append(
-                            {"freq": val, "ir": 0.0, "raman": 0.0, "vector": []}
-                        )
+                        mode_id = int(parts[0].rstrip(":"))
+                        mode = {"freq": val, "ir": 0.0, "raman": 0.0, "vector": []}
+                        self.data["frequencies"].append(mode)
+                        frequencies_by_id[mode_id] = mode
                     except (KeyError, IndexError, TypeError, ValueError) as e:
                         logging.warning(
                             "Frequencies: could not parse the vibrational frequency row %r: %s",
@@ -729,11 +736,11 @@ class _SpectraParsingMixin:
                     try:
                         idx = int(parts[0].replace(":", ""))
                         inten = float(parts[ir_col])
-                        if 0 <= idx < len(self.data["frequencies"]):
-                            self.data["frequencies"][idx]["ir"] = inten
+                        if idx in frequencies_by_id:
+                            frequencies_by_id[idx]["ir"] = inten
                             deriv = self._parse_dipole_derivative(line)
                             if deriv is not None:
-                                self.data["frequencies"][idx]["dipole_deriv"] = deriv
+                                frequencies_by_id[idx]["dipole_deriv"] = deriv
                     except ValueError:
                         logging.debug(
                             "IR row not parsed at column %d: %r", ir_col, line
@@ -765,8 +772,8 @@ class _SpectraParsingMixin:
                     try:
                         idx = int(parts[0].replace(":", ""))
                         act = float(parts[raman_col])
-                        if 0 <= idx < len(self.data["frequencies"]):
-                            self.data["frequencies"][idx]["raman"] = act
+                        if idx in frequencies_by_id:
+                            frequencies_by_id[idx]["raman"] = act
                     except ValueError:
                         logging.debug(
                             "Raman row not parsed at column %d: %r", raman_col, line
@@ -817,12 +824,12 @@ class _SpectraParsingMixin:
 
             # Process collected mode buffer AFTER parsing all mode blocks
             for m_idx, vec_flat in mode_buffer.items():
-                if 0 <= m_idx < len(self.data["frequencies"]):
+                if m_idx in frequencies_by_id and len(vec_flat) == n_coords:
                     vecs = []
                     for k in range(0, len(vec_flat), 3):
                         if k + 2 < len(vec_flat):
                             vecs.append((vec_flat[k], vec_flat[k + 1], vec_flat[k + 2]))
-                    self.data["frequencies"][m_idx]["vector"] = vecs
+                    frequencies_by_id[m_idx]["vector"] = vecs
 
     def _find_intensity_column(self, section_start, wanted, default):
         """Index of the first column in `wanted` within a spectrum header.

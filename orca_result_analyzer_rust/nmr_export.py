@@ -1,6 +1,7 @@
 """NMR dialog mixin: exporting the shielding/coupling tables and spectrum plot."""
 
 import os
+import csv
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog
 from .utils import get_default_export_path, notify
 
@@ -134,12 +135,13 @@ class _NMRExportMixin:
             return
 
         try:
-            with open(filename, "w", encoding="utf-8") as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 # Headers
                 headers = []
                 for c in range(self.table.columnCount()):
                     headers.append(self.table.horizontalHeaderItem(c).text())
-                f.write(",".join(headers) + "\n")
+                writer = csv.writer(f)
+                writer.writerow(headers)
 
                 # Rows
                 for r in range(self.table.rowCount()):
@@ -147,11 +149,8 @@ class _NMRExportMixin:
                     for c in range(self.table.columnCount()):
                         it = self.table.item(r, c)
                         text = it.text() if it else ""
-                        # Escape commas if present
-                        if "," in text:
-                            text = f'"{text}"'
                         cols.append(text)
-                    f.write(",".join(cols) + "\n")
+                    writer.writerow(cols)
 
             notify(self, f"Table data exported to: {os.path.basename(filename)}", 5000)
         # Qt slot: a slot must never crash the app (CONTRIBUTING.md 4B)

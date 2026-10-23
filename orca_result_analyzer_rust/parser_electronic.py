@@ -46,8 +46,7 @@ class _ElectronicParsingMixin:
         generic_starts = [idx for idx, spin in start_indices if spin == "restricted"]
         if generic_starts:
             start_indices = [
-                (idx, spin) for idx, spin in start_indices
-                if idx >= generic_starts[-1]
+                (idx, spin) for idx, spin in start_indices if idx >= generic_starts[-1]
             ]
 
         # Only keep the LAST occurrence for each spin type
@@ -70,6 +69,7 @@ class _ElectronicParsingMixin:
                 current_spin = "alpha"
 
             last_first_mo_idx = -1
+            current_mos = []
 
             while curr < len(self.lines):
                 line = self.lines[curr].strip()
@@ -270,8 +270,7 @@ class _ElectronicParsingMixin:
         generic_starts = [idx for idx, spin in start_indices if spin == "restricted"]
         if generic_starts:
             start_indices = [
-                (idx, spin) for idx, spin in start_indices
-                if idx >= generic_starts[-1]
+                (idx, spin) for idx, spin in start_indices if idx >= generic_starts[-1]
             ]
 
         # Only keep the LAST occurrence for each spin type

@@ -9,6 +9,7 @@
 //   2. Distance cutoff — shells with exp(-α_min·r²) < 1e-15 are skipped
 //   3. Reusable exp buffer — one Vec per rayon task (no per-point allocation)
 
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
@@ -267,10 +268,26 @@ impl BasisSetEngineRust {
 
         for item in shells_py.iter() {
             let sh = item.downcast::<PyDict>()?;
-            let l_type: u32 = sh.get_item("type")?.unwrap().extract()?;
-            let center: Vec<f64> = sh.get_item("center")?.unwrap().extract()?;
-            let exps: Vec<f64> = sh.get_item("exps")?.unwrap().extract()?;
-            let coeffs: Vec<f64> = sh.get_item("coeffs")?.unwrap().extract()?;
+            let required = |key: &str| {
+                sh.get_item(key)?
+                    .ok_or_else(|| PyKeyError::new_err(key.to_string()))
+            };
+            let l_type: u32 = required("type")?.extract()?;
+            let center: Vec<f64> = required("center")?.extract()?;
+            let exps: Vec<f64> = required("exps")?.extract()?;
+            let coeffs: Vec<f64> = required("coeffs")?.extract()?;
+            if center.len() != 3 || center.iter().any(|v| !v.is_finite()) {
+                return Err(PyValueError::new_err(
+                    "Shell center must contain three finite coordinates.",
+                ));
+            }
+            if exps.is_empty()
+                || exps.len() != coeffs.len()
+                || exps.iter().any(|v| !v.is_finite() || *v <= 0.0)
+                || coeffs.iter().any(|v| !v.is_finite())
+            {
+                return Err(PyValueError::new_err("Shell exponents and coefficients must have matching nonempty lengths, finite values, and positive exponents."));
+            }
 
             let defs = get_basis_definitions(l_type);
             if defs.is_empty() {
@@ -351,14 +368,26 @@ Visualization is                      blocked rather than showing an orbital tha
     ///
     /// Returns a flat (N,) list of phi values.
     /// Grid points are evaluated in parallel across all CPU cores via Rayon.
-    fn evaluate_mo_on_grid(&self, grid_flat: Vec<f64>, mo_coeffs: Vec<f64>) -> Vec<f64> {
+    fn evaluate_mo_on_grid(&self, grid_flat: Vec<f64>, mo_coeffs: Vec<f64>) -> PyResult<Vec<f64>> {
+        if grid_flat.len() % 3 != 0 || grid_flat.iter().any(|v| !v.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Grid must contain finite XYZ coordinate triples.",
+            ));
+        }
+        if mo_coeffs.len() != self.n_basis_val || mo_coeffs.iter().any(|v| !v.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "Expected {} finite MO coefficients, got {}.",
+                self.n_basis_val,
+                mo_coeffs.len()
+            )));
+        }
         let n_pts = grid_flat.len() / 3;
         let shells = &self.shells;
 
         // Each point is independent — evaluate in parallel.
         // `with_min_len` batches points so each rayon task allocates exp_buf once
         // and reuses it across multiple points.
-        (0..n_pts)
+        Ok((0..n_pts)
             .into_par_iter()
             .with_min_len(256)
             .map_init(
@@ -416,7 +445,7 @@ Visualization is                      blocked rather than showing an orbital tha
                     phi
                 },
             )
-            .collect()
+            .collect())
     }
 }
 

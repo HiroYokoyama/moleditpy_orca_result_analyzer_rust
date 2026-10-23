@@ -1106,13 +1106,16 @@ class TrajectoryResultDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Graph", default_path, "Images (*.png *.jpg *.svg)"
         )
-        if path:
-            self.canvas.fig.savefig(path, dpi=300)
-            notify(self, f"Graph saved to: {os.path.basename(path)}", 5000)
-
-        # Restore annotation visibility
-        self.annot.set_visible(was_visible)
-        self.canvas.draw()
+        try:
+            if path:
+                self.canvas.fig.savefig(path, dpi=300)
+                notify(self, f"Graph saved to: {os.path.basename(path)}", 5000)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logging.warning("Trajectory: graph export failed: %s", exc)
+            QMessageBox.critical(self, "Export Error", f"Could not save image:\n{exc}")
+        finally:
+            self.annot.set_visible(was_visible)
+            self.canvas.draw()
 
     def clear_selection(self):
         """Remove the plot's highlight marker/line and clear the step info label."""

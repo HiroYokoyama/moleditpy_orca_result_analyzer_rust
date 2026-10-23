@@ -735,7 +735,11 @@ class MODialog(QDialog):
         sequential worker queue but suppresses show_cube for the batch.
         """
         if self._generation_busy():
-            notify(self, "Cube generation already in progress; try again when it finishes.", 5000)
+            notify(
+                self,
+                "Cube generation already in progress; try again when it finishes.",
+                5000,
+            )
             if on_done:
                 on_done()
             return
@@ -784,7 +788,11 @@ class MODialog(QDialog):
         if not selected:
             return
         if self._generation_busy():
-            notify(self, "Cube generation already in progress; try again when it finishes.", 5000)
+            notify(
+                self,
+                "Cube generation already in progress; try again when it finishes.",
+                5000,
+            )
             return
 
         # Build Queue
@@ -808,6 +816,16 @@ class MODialog(QDialog):
         """Generate the cube for the next queued orbital, or finish the batch."""
         if getattr(self, "_is_closing", False) is True:
             return
+        if getattr(self, "_processing_queue", False) is True:
+            return
+        self._processing_queue = True
+        try:
+            while getattr(self, "generation_queue", None):
+                key = self.generation_queue.pop(0)
+                if self._generate_single_mo(key):
+                    return
+        finally:
+            self._processing_queue = False
         if not getattr(self, "generation_queue", None):
             # Done
             if (
@@ -823,14 +841,6 @@ class MODialog(QDialog):
             if cb:
                 cb()
             return
-
-        # Get next key
-        key = self.generation_queue.pop(0)
-
-        # Check if worker running
-        # Actually we force sequential.
-
-        self._generate_single_mo(key)
 
     def _generate_single_mo(self, key):
         # ... (Logic from old visualize_current_mo) ...
@@ -997,7 +1007,11 @@ class MODialog(QDialog):
         )
         worker = self.worker
         _RUNNING_WORKERS.add(worker)
-        connect_queued(worker.finished, lambda: _RUNNING_WORKERS.discard(worker), cleanup=(worker.finished,))
+        connect_queued(
+            worker.finished,
+            lambda: _RUNNING_WORKERS.discard(worker),
+            cleanup=(worker.finished,),
+        )
 
         self.worker.progress_sig.connect(self.progress_dialog.setValue)
 
@@ -1042,8 +1056,15 @@ class MODialog(QDialog):
             # Trigger Next
             self.process_generation_queue()
 
-        connect_queued(self.worker.finished_sig, on_finished, self, (bool, str), cleanup=(self.worker.finished,))
+        connect_queued(
+            self.worker.finished_sig,
+            on_finished,
+            self,
+            (bool, str),
+            cleanup=(self.worker.finished,),
+        )
         self.worker.start()
+        return True
 
     def pick_color(self, which):
         """Open a color picker for the +/- lobe and apply it to the swatch button."""

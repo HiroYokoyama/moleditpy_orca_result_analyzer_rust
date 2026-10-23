@@ -583,6 +583,7 @@ class SpectrumWidget(QWidget):
                     st_ys = [p[1] for p in stick_points]
                     scale_max_sticks = max(st_ys) if st_ys else 1.0
                     g_max = max(g_max, scale_max_sticks)
+                    g_min = min(g_min, min(st_ys))
 
                 if g_min >= 0:
                     new_ymin, new_ymax = 0, g_max * 1.1

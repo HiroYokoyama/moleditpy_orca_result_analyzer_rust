@@ -77,7 +77,9 @@ class TestFrequenciesTakeTheLastBlock(unittest.TestCase):
 
 
 def _nmr_summary(values):
-    rows = "\n".join(f"  {i}       H          {v:.3f}         10.000" for i, v in values)
+    rows = "\n".join(
+        f"  {i}       H          {v:.3f}         10.000" for i, v in values
+    )
     return f"""
 --------------------------
 CHEMICAL SHIELDING SUMMARY (ppm)
@@ -155,7 +157,7 @@ CARTESIAN COORDINATES (ANGSTROEM)
 
 
 class TestScanStepGeometry(unittest.TestCase):
-    def test_a_step_without_its_own_block_falls_back_to_the_next_one(self):
+    def test_a_step_without_its_own_block_does_not_borrow_the_next_one(self):
         text = """
         *               RELAXED SURFACE SCAN STEP   1               *
 FINAL SINGLE POINT ENERGY       -1.000000
@@ -167,8 +169,9 @@ CARTESIAN COORDINATES (ANGSTROEM)
 
 """
         steps = _parse(text, "parse_trajectory")["scan_steps"]
-        first = next(s for s in steps if s["scan_step_id"] == 1)
-        self.assertEqual(first["atoms"], ["H"])
+        self.assertFalse(any(s["scan_step_id"] == 1 for s in steps))
+        second = next(s for s in steps if s["scan_step_id"] == 2)
+        self.assertEqual(second["atoms"], ["H"])
 
 
 class TestSCFTraceLabels(unittest.TestCase):

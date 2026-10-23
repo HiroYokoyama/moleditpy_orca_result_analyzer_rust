@@ -276,9 +276,12 @@ class BasisSetEngine:
         grid_coords: (N, 3) array in Bohr
         Returns (N,) numpy array of phi values.
         """
-        if len(mo_coeffs_all) < self.n_basis:
+        grid_coords = np.asarray(grid_coords, dtype=float)
+        if grid_coords.ndim != 2 or grid_coords.shape[1] != 3:
+            raise ValueError("Grid coordinates must have shape (N, 3).")
+        if len(mo_coeffs_all) != self.n_basis:
             raise ValueError(
-                f"Not enough coefficients. Needed {self.n_basis}, got {len(mo_coeffs_all)}"
+                f"Expected {self.n_basis} coefficients, got {len(mo_coeffs_all)}"
             )
         grid_flat = grid_coords.ravel().tolist()
         result = self._engine.evaluate_mo_on_grid(grid_flat, list(mo_coeffs_all))

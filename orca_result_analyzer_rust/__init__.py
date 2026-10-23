@@ -1,7 +1,7 @@
 """Plugin entry points and metadata for the ORCA Result Analyzer plugin."""
 
 PLUGIN_NAME = "ORCA Result Analyzer"
-PLUGIN_VERSION = "5.0.2"
+PLUGIN_VERSION = "5.0.3"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Comprehensive analyzer for ORCA output files (.out). Includes Vibrational, MO, TDDFT, and NMR analysis."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=5.0.0, <6.0.0"
