@@ -67,12 +67,13 @@ class TestSphericalShellShapes(unittest.TestCase):
 
     @staticmethod
     def _real_sph_harm(l, m, theta, phi):
-        sph_harm_y = __import__(
-            "scipy.special", fromlist=["sph_harm_y"]
-        ).sph_harm_y
+        special = __import__("scipy.special", fromlist=["sph_harm_y"])
+        if hasattr(special, "sph_harm_y"):
+            y = special.sph_harm_y(l, abs(m), theta, phi)
+        else:
+            y = special.sph_harm(abs(m), l, phi, theta)
         if m == 0:
-            return sph_harm_y(l, 0, theta, phi).real
-        y = sph_harm_y(l, abs(m), theta, phi)
+            return y.real
         sign = (-1) ** abs(m)
         return math.sqrt(2) * sign * (y.real if m > 0 else y.imag)
 
@@ -93,10 +94,7 @@ class TestSphericalShellShapes(unittest.TestCase):
         coeffs[component] = 1.0
         got = np.asarray(eng.evaluate_mo_on_grid(0, self.dirs, coeffs))
         ref = np.array(
-            [
-                self._real_sph_harm(l_type, m, t, p)
-                for t, p in zip(self.theta, self.phi)
-            ]
+            [self._real_sph_harm(l_type, m, t, p) for t, p in zip(self.theta, self.phi)]
         )
         return abs(
             float(np.dot(got, ref)) / (np.linalg.norm(got) * np.linalg.norm(ref))
