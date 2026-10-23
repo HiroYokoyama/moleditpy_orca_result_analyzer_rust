@@ -2,9 +2,10 @@
 
 import argparse
 import ast
+import hashlib
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,18 +27,35 @@ def check(source):
     if revision != manifest["commit"]:
         errors.append(f"canonical commit is {revision}, expected {manifest['commit']}")
     for name in manifest["shared_modules"] + manifest["shared_parser_mixins"]:
-        expected = adapted((source / "orca_result_analyzer" / name).read_text(encoding="utf-8"))
+        expected = adapted(
+            (source / "orca_result_analyzer" / name).read_text(encoding="utf-8")
+        )
         if name == "__init__.py":
-            expected = expected.replace('PLUGIN_SUPPORTED_PYTHON_VERSION = ">=3.9, <3.15"',
-                                        'PLUGIN_SUPPORTED_PYTHON_VERSION = ">=3.9, <3.14"')
+            expected = expected.replace(
+                'PLUGIN_SUPPORTED_PYTHON_VERSION = ">=3.9, <3.15"',
+                'PLUGIN_SUPPORTED_PYTHON_VERSION = ">=3.9, <3.14"',
+            )
         actual = (ROOT / "orca_result_analyzer_rust" / name).read_text(encoding="utf-8")
         if actual != expected:
             errors.append(f"shared module differs: {name}")
 
-    expected_engine = tree(adapted((source / "orca_result_analyzer/mo_engine.py").read_text(encoding="utf-8")))
-    actual_engine = tree((ROOT / "orca_result_analyzer_rust/mo_engine.py").read_text(encoding="utf-8"))
-    for name in ("CubeWriter", "CalcWorker", "UnsupportedBasisError", "read_generation_settings"):
-        expected = next(n for n in expected_engine.body if getattr(n, "name", None) == name)
+    expected_engine = tree(
+        adapted(
+            (source / "orca_result_analyzer/mo_engine.py").read_text(encoding="utf-8")
+        )
+    )
+    actual_engine = tree(
+        (ROOT / "orca_result_analyzer_rust/mo_engine.py").read_text(encoding="utf-8")
+    )
+    for name in (
+        "CubeWriter",
+        "CalcWorker",
+        "UnsupportedBasisError",
+        "read_generation_settings",
+    ):
+        expected = next(
+            n for n in expected_engine.body if getattr(n, "name", None) == name
+        )
         actual = next(n for n in actual_engine.body if getattr(n, "name", None) == name)
         if ast.dump(actual) != ast.dump(expected):
             errors.append(f"shared MO API differs: {name}")
@@ -45,8 +63,21 @@ def check(source):
     for name in manifest.get("shared_images", []):
         upstream_image = source / "img" / name
         local_image = ROOT / "img" / name
-        if not local_image.is_file() or upstream_image.read_bytes() != local_image.read_bytes():
+        if (
+            not local_image.is_file()
+            or upstream_image.read_bytes() != local_image.read_bytes()
+        ):
             errors.append(f"shared image differs: {name}")
+
+    # The checker engine is owned by the plugin collection, independently of Python UI parity.
+    checker_lock = json.loads(
+        (ROOT / "scripts/api-checker.lock.json").read_text(encoding="utf-8")
+    )
+    checker = (
+        (ROOT / "tests/plugin_api_checker.py").read_bytes().replace(b"\r\n", b"\n")
+    )
+    if hashlib.sha256(checker).hexdigest() != checker_lock["sha256_lf"]:
+        errors.append("canonical API checker copy differs from its pinned hash")
 
     upstream_tests = source / "tests"
     for path in upstream_tests.rglob("*"):
@@ -54,6 +85,23 @@ def check(source):
             continue
         relative = path.relative_to(upstream_tests)
         dest = ROOT / "tests" / relative
+        if str(relative) == "plugin_api_checker.py":
+            continue
+        if str(relative) == "test_api.py":
+            # Retain consumer integration parity without reintroducing shared engine unit tests.
+            expected_class = next(
+                n
+                for n in tree(adapted(path.read_text(encoding="utf-8"))).body
+                if isinstance(n, ast.ClassDef) and n.name == "TestAPIChecker"
+            )
+            actual_class = next(
+                n
+                for n in tree(dest.read_text(encoding="utf-8")).body
+                if isinstance(n, ast.ClassDef) and n.name == "TestAPIChecker"
+            )
+            if ast.dump(actual_class) != ast.dump(expected_class):
+                errors.append("shared API integration check differs")
+            continue
         if not dest.is_file():
             errors.append(f"missing test/fixture: {relative}")
         elif path.suffix == ".py":
@@ -62,7 +110,10 @@ def check(source):
             matches = actual == expected
             if not matches:
                 errors.append(f"shared test differs: {relative}")
-        elif path.suffix not in (".md", ".out", ".cube") and path.read_bytes() != dest.read_bytes():
+        elif (
+            path.suffix not in (".md", ".out", ".cube")
+            and path.read_bytes() != dest.read_bytes()
+        ):
             errors.append(f"fixture differs: {relative}")
         elif path.suffix in (".out", ".cube"):
             if path.read_text(encoding="utf-8") != dest.read_text(encoding="utf-8"):
@@ -72,7 +123,11 @@ def check(source):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=ROOT.parent / "moleditpy_orca_result_analyzer_plugin")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=ROOT.parent / "moleditpy_orca_result_analyzer_plugin",
+    )
     args = parser.parse_args()
     failures = check(args.source.resolve())
     if failures:
