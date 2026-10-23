@@ -33,16 +33,17 @@ static RE_DISPERSION: Lazy<Regex> =
 static RE_MAYER_BOND: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"B\(\s*(\d+)-(\w+)\s*,\s*(\d+)-(\w+)\s*\)\s*:\s*(-?\d+\.\d+)").unwrap()
 });
-/// Plain decimal float — no bare-integer alternative, matching the Python
-/// energy-component scan.
-static RE_PLAIN_FLOAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[-+]?\d+\.\d+").unwrap());
+static RE_COMPONENT_FLOAT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][-+]?\d+)?").unwrap());
 /// The label must be a whole word: without \b the trailing "e" of a preceding
 /// word (e.g. "Coordinate 1.2") matches the bare-"E" alternative
 /// case-insensitively and steals the wrong number as the energy.
-static RE_ENERGY_LABEL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(?:Energy|E)\b[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)").unwrap());
+static RE_ENERGY_LABEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(?:Energy|E)\b[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
+        .unwrap()
+});
 static RE_DIST_LABEL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
+    Regex::new(r"(?i)\b(?:Dist(?:ance)?|Coord(?:inate)?|Scan)[=:\s]+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
         .unwrap()
 });
 static RE_STATE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)STATE\s+(\d+)\s*:").unwrap());
@@ -66,7 +67,11 @@ static RE_FLOATS_IN_LINE: Lazy<Regex> =
 // ---------------------------------------------------------------------------
 
 fn parse_f64(s: &str) -> Option<f64> {
-    s.trim().parse::<f64>().ok()
+    s.trim()
+        .replace(['D', 'd'], "E")
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
 }
 
 /// Index of the first column named in `wanted` within an IR/Raman header.
@@ -358,6 +363,7 @@ impl<'a> OrcaRustParser<'a> {
     // -----------------------------------------------------------------------
     fn parse(&self) -> ParsedData {
         let mut data = ParsedData::default();
+        data.mult = 1;
         self.parse_basic(&mut data);
         self.parse_gradients(&mut data);
         self.parse_trajectory(&mut data);
@@ -508,7 +514,7 @@ impl<'a> OrcaRustParser<'a> {
                             let vx = parse_f64(parts[3])?;
                             let vy = parse_f64(parts[4])?;
                             let vz = parse_f64(parts[5])?;
-                            let idx = if idx_raw > 0 { idx_raw as usize - 1 } else { 0 };
+                            let idx = usize::try_from(idx_raw).ok()?;
                             Some((idx, parts[1].to_string(), vx, vy, vz))
                         })
                     } else {
@@ -516,7 +522,7 @@ impl<'a> OrcaRustParser<'a> {
                             let vx = parse_f64(parts[2])?;
                             let vy = parse_f64(parts[3])?;
                             let vz = parse_f64(parts[4])?;
-                            let idx = if idx_raw > 0 { idx_raw as usize - 1 } else { 0 };
+                            let idx = usize::try_from(idx_raw).ok()?;
                             Some((idx, parts[1].to_string(), vx, vy, vz))
                         })
                     };
@@ -532,6 +538,10 @@ impl<'a> OrcaRustParser<'a> {
             }
 
             if !block_grads.is_empty() {
+                let offset = usize::from(!block_grads.iter().any(|g| g.atom_idx == 0));
+                for grad in &mut block_grads {
+                    grad.atom_idx -= offset;
+                }
                 data.all_gradients.push(GradientBlock {
                     line: start_idx,
                     grads: block_grads,
@@ -547,15 +557,16 @@ impl<'a> OrcaRustParser<'a> {
     // -----------------------------------------------------------------------
     // Helper: read coords from a given line index (look forward for CARTESIAN block)
     // -----------------------------------------------------------------------
-    fn read_coords_from(&self, idx: usize) -> (Vec<String>, Vec<[f64; 3]>, bool) {
-        let limit = 1000usize.min(self.len().saturating_sub(idx));
+    fn read_coords_from(&self, idx: usize, end: usize) -> (Vec<String>, Vec<[f64; 3]>, bool) {
+        let end = end.min(self.len());
+        let limit = 1000usize.min(end.saturating_sub(idx));
         for k in 0..limit {
             let line = self.get(idx + k).to_uppercase();
             if line.contains("CARTESIAN COORDINATES (ANGSTROEM)") {
                 let mut c_idx = idx + k + 2;
                 let mut atoms = Vec::new();
                 let mut coords = Vec::new();
-                while c_idx < self.len() {
+                while c_idx < end {
                     let cl = self.get(c_idx).trim();
                     if cl.is_empty() || cl.contains("-------") {
                         break;
@@ -750,7 +761,13 @@ impl<'a> OrcaRustParser<'a> {
                     .map(|g| g.grads.clone())
                     .unwrap_or_default();
 
-                let (atoms, coords, found) = self.read_coords_from(i);
+                // A scan point may include several optimization cycles; its
+                // summary belongs to the last geometry within that point.
+                let last_geometry = (i..next_marker)
+                    .rev()
+                    .find(|&k| self.upper(k).contains("CARTESIAN COORDINATES (ANGSTROEM)"))
+                    .unwrap_or(i);
+                let (atoms, coords, found) = self.read_coords_from(last_geometry, next_marker);
                 if found {
                     data.scan_steps.push(ScanStep {
                         step_type: "scan_step".to_string(),
@@ -779,6 +796,8 @@ impl<'a> OrcaRustParser<'a> {
                         u.contains("OPTIMIZATION CYCLE")
                             || u.contains("OPTIMIZATION HAS CONVERGED")
                             || u.contains("OPTIMIZATION HAS RUN OUT OF CYCLES")
+                            || u.contains("RELAXED SURFACE SCAN STEP")
+                            || u.contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
                             || u.contains("ORCA TERMINATED NORMALLY")
                     })
                     .unwrap_or(self.len());
@@ -827,7 +846,7 @@ impl<'a> OrcaRustParser<'a> {
                     .map(|g| g.grads.clone())
                     .unwrap_or_default();
 
-                let (atoms, coords, found) = self.read_coords_from(i);
+                let (atoms, coords, found) = self.read_coords_from(i, next_marker);
                 if found {
                     data.scan_steps.push(ScanStep {
                         step_type: "opt_cycle".to_string(),
@@ -847,8 +866,16 @@ impl<'a> OrcaRustParser<'a> {
                 // scan prints this marker per scan point, and matching only
                 // the first dropped the converged geometry of every scan step
                 // but the last.
-                let mut final_en = 0.0_f64;
-                for k in i..self.len().min(i + 1500) {
+                let next_marker = (i + 1..self.len())
+                    .find(|&k| {
+                        let u = self.upper(k);
+                        u.contains("RELAXED SURFACE SCAN STEP")
+                            || u.contains("OPTIMIZATION CYCLE")
+                            || u.contains("FINAL ENERGY EVALUATION AT THE STATIONARY POINT")
+                    })
+                    .unwrap_or(self.len());
+                let mut final_en = f64::NAN;
+                for k in i..next_marker.min(i + 1500) {
                     let uu_k = self.get(k).to_uppercase();
                     if uu_k.contains("FINAL SINGLE POINT ENERGY") {
                         if let Some(v) = self.get(k).split_whitespace().last().and_then(parse_f64) {
@@ -857,7 +884,7 @@ impl<'a> OrcaRustParser<'a> {
                         break;
                     }
                 }
-                let (f_atoms, f_coords, f_found) = self.read_coords_from(i);
+                let (f_atoms, f_coords, f_found) = self.read_coords_from(i, next_marker);
                 if f_found {
                     // Numbering continues that scan step's own cycles, not the
                     // global maximum.
@@ -892,6 +919,7 @@ impl<'a> OrcaRustParser<'a> {
     // -----------------------------------------------------------------------
     fn parse_frequencies(&self, data: &mut ParsedData) {
         data.frequencies.clear();
+        let mut frequencies_by_id: HashMap<i32, usize> = HashMap::new();
 
         // 1. Frequency values
         let mut freq_start: Option<usize> = None;
@@ -924,7 +952,11 @@ impl<'a> OrcaRustParser<'a> {
                 if line.contains(':') && (line.contains("cm**-1") || line.contains("cm-1")) {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
-                        if let Some(v) = parse_f64(parts[1]) {
+                        if let (Some(mode_id), Some(v)) = (
+                            parse_i32(parts[0].trim_end_matches(':')),
+                            parse_f64(parts[1]),
+                        ) {
+                            frequencies_by_id.insert(mode_id, data.frequencies.len());
                             data.frequencies.push(FreqEntry {
                                 freq: v,
                                 ..Default::default()
@@ -962,14 +994,19 @@ impl<'a> OrcaRustParser<'a> {
                     if let (Some(idx), Some(inten)) =
                         (parse_i32(&idx_str), parse_f64(parts[ir_col]))
                     {
-                        let idx = idx as usize;
-                        if idx < data.frequencies.len() {
+                        if let Some(&idx) = frequencies_by_id.get(&idx) {
                             data.frequencies[idx].ir = inten;
                             if let (Some(left), Some(right)) = (line.find('('), line.find(')')) {
                                 if left < right {
-                                    let values: Option<Vec<f64>> = line[left + 1..right].split_whitespace().map(parse_f64).collect();
+                                    let values: Option<Vec<f64>> = line[left + 1..right]
+                                        .split_whitespace()
+                                        .map(parse_f64)
+                                        .collect();
                                     if let Some(v) = values {
-                                        if v.len() == 3 { data.frequencies[idx].dipole_deriv = Some([v[0], v[1], v[2]]); }
+                                        if v.len() == 3 {
+                                            data.frequencies[idx].dipole_deriv =
+                                                Some([v[0], v[1], v[2]]);
+                                        }
                                     }
                                 }
                             }
@@ -1004,8 +1041,7 @@ impl<'a> OrcaRustParser<'a> {
                     if let (Some(idx), Some(act)) =
                         (parse_i32(&idx_str), parse_f64(parts[raman_col]))
                     {
-                        let idx = idx as usize;
-                        if idx < data.frequencies.len() {
+                        if let Some(&idx) = frequencies_by_id.get(&idx) {
                             data.frequencies[idx].raman = act;
                         }
                     }
@@ -1051,8 +1087,11 @@ impl<'a> OrcaRustParser<'a> {
                         if dparts.len() < 2 {
                             continue;
                         }
-                        let values: Vec<f64> =
-                            dparts[1..].iter().filter_map(|s| parse_f64(s)).collect();
+                        let values: Option<Vec<f64>> =
+                            dparts[1..].iter().map(|s| parse_f64(s)).collect();
+                        let Some(values) = values else {
+                            continue;
+                        };
                         for (c, &m_idx) in headers.iter().enumerate() {
                             if c < values.len() {
                                 mode_buffer.entry(m_idx).or_default().push(values[c]);
@@ -1066,13 +1105,16 @@ impl<'a> OrcaRustParser<'a> {
             }
 
             for (m_idx, vec_flat) in mode_buffer {
-                if m_idx < data.frequencies.len() {
+                if let Some(&idx) = frequencies_by_id
+                    .get(&(m_idx as i32))
+                    .filter(|_| vec_flat.len() == n_coords)
+                {
                     let vecs: Vec<[f64; 3]> = vec_flat
                         .chunks(3)
                         .filter(|c| c.len() == 3)
                         .map(|c| [c[0], c[1], c[2]])
                         .collect();
-                    data.frequencies[m_idx].vector = vecs;
+                    data.frequencies[idx].vector = vecs;
                 }
             }
         }
@@ -1184,7 +1226,12 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
 
-        if let Some(last) = start_indices.iter().filter(|(_, spin)| spin == "restricted").map(|(i, _)| *i).max() {
+        if let Some(last) = start_indices
+            .iter()
+            .filter(|(_, spin)| spin == "restricted")
+            .map(|(i, _)| *i)
+            .max()
+        {
             start_indices.retain(|(i, _)| *i >= last);
         }
         // Keep last occurrence of each spin type
@@ -1268,7 +1315,12 @@ impl<'a> OrcaRustParser<'a> {
             }
         }
 
-        if let Some(last) = start_indices.iter().filter(|(_, spin)| spin == "restricted").map(|(i, _)| *i).max() {
+        if let Some(last) = start_indices
+            .iter()
+            .filter(|(_, spin)| spin == "restricted")
+            .map(|(i, _)| *i)
+            .max()
+        {
             start_indices.retain(|(i, _)| *i >= last);
         }
         // Keep last occurrence per spin type
@@ -1397,7 +1449,8 @@ impl<'a> OrcaRustParser<'a> {
                         };
 
                     let joined = val_strs.join(" ");
-                    let values: Vec<&str> = RE_FLOAT.find_iter(&joined).map(|m| m.as_str()).collect();
+                    let values: Vec<&str> =
+                        RE_FLOAT.find_iter(&joined).map(|m| m.as_str()).collect();
                     if values.len() == current_mos.len() {
                         for (k, v_str) in values.iter().enumerate() {
                             if let Some(val) = parse_f64(v_str) {
@@ -1447,14 +1500,20 @@ impl<'a> OrcaRustParser<'a> {
                 mayer_start = i as i64;
             } else if uu.contains("NATURAL POPULATIONS") {
                 nbo_start = i as i64;
-            } else if (uu.contains("CHELPG ATOMIC CHARGES") || uu.contains("CHELPG CHARGES")) && !uu.contains("GENERATION") && !uu.contains("CALCULATED") {
+            } else if (uu.contains("CHELPG ATOMIC CHARGES") || uu.contains("CHELPG CHARGES"))
+                && !uu.contains("GENERATION")
+                && !uu.contains("CALCULATED")
+            {
                 chelpg_start = i as i64;
             } else if uu.contains("MERZ-KOLLMAN ATOMIC CHARGES") || uu.contains("MK ATOMIC CHARGES")
             {
                 mk_start = i as i64;
             } else if uu.contains("MBIS ANALYSIS") {
                 mbis_start = i as i64;
-            } else if (uu.contains("RESP ATOMIC CHARGES") || uu.contains("RESP CHARGES")) && !uu.contains("GENERATION") && !uu.contains("CALCULATED") {
+            } else if (uu.contains("RESP ATOMIC CHARGES") || uu.contains("RESP CHARGES"))
+                && !uu.contains("GENERATION")
+                && !uu.contains("CALCULATED")
+            {
                 resp_start = i as i64;
             } else if uu.contains("FRONTIER MOLECULAR ORBITAL POPULATION ANALYSIS") {
                 fmo_start = i as i64;
@@ -1474,6 +1533,21 @@ impl<'a> OrcaRustParser<'a> {
             let mut curr = start_idx as usize + header_lines;
             while curr < self.len() {
                 let line = self.get(curr).trim();
+                let upper = line.to_uppercase();
+                if [
+                    "ATOMIC CHARGES",
+                    "HIRSHFELD ANALYSIS",
+                    "MBIS ANALYSIS",
+                    "MAYER POPULATION ANALYSIS",
+                    "NATURAL POPULATIONS",
+                    "CHELPG CHARGES",
+                    "RESP CHARGES",
+                ]
+                .iter()
+                .any(|marker| upper.contains(marker))
+                {
+                    break;
+                }
                 if line.is_empty() || line.contains("---") || line.contains("Sum of") {
                     if !res.is_empty() {
                         break;
@@ -1482,22 +1556,20 @@ impl<'a> OrcaRustParser<'a> {
                     continue;
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let (idx_str, sym) = if let Some(cap) = RE_MERGED_ATOM.captures(parts[0]) {
-                        (cap[1].to_string(), cap[2].to_string())
-                    } else {
-                        let idx = parts[0].trim_end_matches(':').to_string();
-                        let sym = parts[1].trim_end_matches(':').to_string();
-                        (idx, sym)
-                    };
-                    if let Some(atom_idx) = parse_i32(&idx_str) {
-                        let val = if hirshfeld || mbis {
-                            parse_f64(parts[2])
-                        } else if parts.len() >= 4 && parts[2] == ":" {
-                            parse_f64(parts[3])
+                if parts.len() >= 2 {
+                    let (idx_str, sym, mut values) =
+                        if let Some(cap) = RE_MERGED_ATOM.captures(parts[0]) {
+                            (cap[1].to_string(), cap[2].to_string(), &parts[1..])
                         } else {
-                            parse_f64(parts[2])
+                            let idx = parts[0].trim_end_matches(':').to_string();
+                            let sym = parts[1].trim_end_matches(':').to_string();
+                            (idx, sym, &parts[2..])
                         };
+                    if values.first() == Some(&":") {
+                        values = &values[1..];
+                    }
+                    if let Some(atom_idx) = parse_i32(&idx_str) {
+                        let val = values.first().and_then(|v| parse_f64(v));
                         if let Some(charge) = val {
                             let mut entry = ChargeEntry {
                                 atom_idx,
@@ -1505,15 +1577,11 @@ impl<'a> OrcaRustParser<'a> {
                                 charge,
                                 ..Default::default()
                             };
-                            if hirshfeld && parts.len() >= 4 {
-                                entry.spin = parse_f64(parts[3]);
+                            if hirshfeld {
+                                entry.spin = values.get(1).and_then(|v| parse_f64(v));
                             } else if mbis {
-                                if parts.len() >= 4 {
-                                    entry.population = parse_f64(parts[3]);
-                                }
-                                if parts.len() >= 5 {
-                                    entry.spin = parse_f64(parts[4]);
-                                }
+                                entry.population = values.get(1).and_then(|v| parse_f64(v));
+                                entry.spin = values.get(2).and_then(|v| parse_f64(v));
                             }
                             res.push(entry);
                         }
@@ -1912,9 +1980,9 @@ impl<'a> OrcaRustParser<'a> {
         let mut found: HashMap<&str, (f64, bool)> = HashMap::new();
         for line in &self.lines {
             for (sub, label, dimensionless) in SPECS.iter() {
-                if line.contains(sub) {
-                    if let Some(v) = RE_PLAIN_FLOAT
-                        .find_iter(line)
+                if let Some((_, values)) = line.split_once(sub) {
+                    if let Some(v) = RE_COMPONENT_FLOAT
+                        .find_iter(values)
                         .last()
                         .and_then(|m| parse_f64(m.as_str()))
                     {
@@ -2009,8 +2077,16 @@ impl<'a> OrcaRustParser<'a> {
         let mut states_dict: HashMap<i32, TddftState> = HashMap::new();
 
         // Pass 1: Detailed excited state blocks
-        let header_re = Regex::new(r"^[A-Z0-9/\-\s]*EXCITED STATES(\s*\((SINGLETS|TRIPLETS)\))?$").unwrap();
-        let run_start = self.lines.iter().enumerate().filter(|(_, line)| header_re.is_match(line.trim()) && !line.contains("TRIPLETS")).map(|(i, _)| i).last().unwrap_or(0);
+        let header_re =
+            Regex::new(r"^[A-Z0-9/\-\s]*EXCITED STATES(\s*\((SINGLETS|TRIPLETS)\))?$").unwrap();
+        let run_start = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| header_re.is_match(line.trim()) && !line.contains("TRIPLETS"))
+            .map(|(i, _)| i)
+            .last()
+            .unwrap_or(0);
         let mut in_triplets = false;
         let mut current_state_id: i32 = -1;
         for &line in &self.lines[run_start..] {
@@ -2019,7 +2095,9 @@ impl<'a> OrcaRustParser<'a> {
                 current_state_id = -1;
                 continue;
             }
-            if in_triplets { continue; }
+            if in_triplets {
+                continue;
+            }
             let line_upper = line.to_uppercase();
 
             if let Some(cap) = RE_STATE_HEADER.captures(&line_upper) {
@@ -2172,10 +2250,18 @@ impl<'a> OrcaRustParser<'a> {
                         let as_ev = if nm > 0.0 { 1239.84193 / nm } else { 0.0 };
                         let as_cm = if nm > 0.0 { 1.0e7 / nm } else { 0.0 };
                         if nm > 0.0 && (col1 - as_cm).abs() < (col1 - as_ev).abs() {
-                            if entry.energy_cm == 0.0 { entry.energy_cm = col1; }
-                            if entry.energy_ev == 0.0 { entry.energy_ev = as_ev; }
-                        } else if entry.energy_ev == 0.0 { entry.energy_ev = col1; }
-                        if entry.energy_nm == 0.0 { entry.energy_nm = nm; }
+                            if entry.energy_cm == 0.0 {
+                                entry.energy_cm = col1;
+                            }
+                            if entry.energy_ev == 0.0 {
+                                entry.energy_ev = as_ev;
+                            }
+                        } else if entry.energy_ev == 0.0 {
+                            entry.energy_ev = col1;
+                        }
+                        if entry.energy_nm == 0.0 {
+                            entry.energy_nm = nm;
+                        }
                     }
                 }
                 curr += 1;
@@ -2209,6 +2295,14 @@ impl<'a> OrcaRustParser<'a> {
                     item.energy_ev = 1239.84193 / item.energy_nm;
                 } else if item.energy_cm > 0.1 {
                     item.energy_ev = item.energy_cm / 8065.54425;
+                }
+            }
+            if item.energy_ev > 0.0 {
+                if item.energy_nm <= 0.0 {
+                    item.energy_nm = 1239.84193 / item.energy_ev;
+                }
+                if item.energy_cm <= 0.0 {
+                    item.energy_cm = item.energy_ev * 8065.54425;
                 }
             }
         }
@@ -2510,7 +2604,8 @@ impl<'a> OrcaRustParser<'a> {
                     current_step_label = "Opt Cycle".to_string();
                 }
             } else if uu.contains("SCAN STEP") {
-                current_step_label = RE_SCAN_STEP.captures(&uu)
+                current_step_label = RE_SCAN_STEP
+                    .captures(&uu)
                     .map(|cap| format!("Scan Step {}", &cap[1]))
                     .unwrap_or_else(|| "Scan Step".to_string());
             } else if uu.contains("ORCA PROPERTIES") || uu.contains("ORCA PROPERTY") {
@@ -2708,7 +2803,11 @@ fn do_parse_xyz_content<'py>(py: Python<'py>, content: &str) -> PyResult<Bound<'
         }
 
         let natoms = match line.parse::<usize>() {
-            Ok(n) => n,
+            Ok(n) if n > 0 => n,
+            Ok(_) => {
+                i += 1;
+                continue;
+            }
             Err(_) => {
                 i += 1;
                 continue;
@@ -2727,7 +2826,7 @@ fn do_parse_xyz_content<'py>(py: Python<'py>, content: &str) -> PyResult<Bound<'
             || (re_ci.is_match(&upper_comment) && !upper_comment.contains("CI-NEB"));
 
         if is_excluded {
-            i += 1 + natoms;
+            i = i.saturating_add(1).saturating_add(natoms).min(n_lines);
             continue;
         }
 
@@ -2736,7 +2835,7 @@ fn do_parse_xyz_content<'py>(py: Python<'py>, content: &str) -> PyResult<Bound<'
             .captures(comment)
             .and_then(|c| parse_f64(&c[1]))
             .or_else(|| {
-                RE_FLOATS_IN_LINE
+                RE_FLOAT
                     .find_iter(comment)
                     .last()
                     .and_then(|m| parse_f64(m.as_str()))
@@ -2852,7 +2951,9 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
             vl.append(row)?;
         }
         fd.set_item("vector", vl)?;
-        if let Some(v) = f.dipole_deriv { fd.set_item("dipole_deriv", (v[0], v[1], v[2]))?; }
+        if let Some(v) = f.dipole_deriv {
+            fd.set_item("dipole_deriv", (v[0], v[1], v[2]))?;
+        }
         freq_list.append(fd)?;
     }
     d.set_item("frequencies", freq_list)?;
@@ -3052,7 +3153,11 @@ fn to_python<'py>(py: Python<'py>, data: &ParsedData) -> PyResult<Bound<'py, PyD
         sd.set_item("type", s.step_type.clone())?;
         sd.set_item("scan_step_id", s.scan_step_id.into_py(py))?;
         sd.set_item("step", s.step)?;
-        if s.energy.is_nan() { sd.set_item("energy", py.None())?; } else { sd.set_item("energy", s.energy)?; }
+        if s.energy.is_nan() {
+            sd.set_item("energy", py.None())?;
+        } else {
+            sd.set_item("energy", s.energy)?;
+        }
         sd.set_item("scan_coord", s.scan_coord.into_py(py))?;
         sd.set_item("dist", s.dist.into_py(py))?;
         let al = PyList::new_bound(py, &s.atoms);
