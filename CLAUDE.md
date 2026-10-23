@@ -120,3 +120,7 @@ bulk parser. The tag release workflow builds the full OS/Python ZIP matrix;
 verify all assets and included license/provenance notices after it completes.
 Python 3.9 Linux jobs use Ubuntu 24.04 because setup-python has no 3.9 build for
 Ubuntu 26.04. Retain the other OS/Python combinations.
+
+## Copied maintenance scripts
+
+See [scripts/COMMON_TOOLS.md](scripts/COMMON_TOOLS.md) for canonical ownership, pinned versions and update instructions. Common script unit tests stay in the canonical repository; retain this repository's own integration checks.
