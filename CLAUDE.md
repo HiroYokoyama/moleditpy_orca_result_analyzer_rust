@@ -124,3 +124,5 @@ Ubuntu 26.04. Retain the other OS/Python combinations.
 ## Copied maintenance scripts
 
 See [scripts/COMMON_TOOLS.md](scripts/COMMON_TOOLS.md) for canonical ownership, pinned versions and update instructions. Common script unit tests stay in the canonical repository; retain this repository's own integration checks.
+
+The API checker engine is an exception to Python test-source synchronization: its canonical owner is `moleditpy-plugins/api-checker/`, pinned by `scripts/api-checker.lock.json`. Keep the consumer API integration class in parity, but do not restore shared engine unit tests from the Python checkout. The source-parity checker validates the engine copy by its pinned hash.
