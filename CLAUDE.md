@@ -25,7 +25,7 @@ Rust engine local.
 **Version:** `orca_result_analyzer_rust/__init__.py` `PLUGIN_VERSION` mirrors the
 Python plugin's version (same functionality → same number). The
 `pyproject.toml` / `Cargo.toml` versions are the build-artifact versions and are
-aligned with the plugin version at 5.0.3. Keep both crate manifests, Cargo.lock
+aligned with the plugin version at 5.0.5. Keep both crate manifests, Cargo.lock
 and the project version consistent when releasing.
 The supported native wheel range is Python 3.9–3.13.
 NBO/spin sections and helper APIs use shared Python mixins; bulk parsing and MO

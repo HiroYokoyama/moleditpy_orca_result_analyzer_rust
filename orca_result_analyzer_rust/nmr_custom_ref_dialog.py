@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .wheel_guard import install_wheel_guard
+
 
 class CustomReferenceDialog(QDialog):
     """Dialog for creating custom reference standards"""
@@ -68,6 +70,7 @@ class CustomReferenceDialog(QDialog):
         scroll_widget = QWidget()
         self.nucleus_layout = QVBoxLayout(scroll_widget)
         scroll.setWidget(scroll_widget)
+        install_wheel_guard(scroll_widget)
 
         config_layout.addWidget(scroll)
 
