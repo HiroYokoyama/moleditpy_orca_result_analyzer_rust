@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin",
-  "commit": "a874b4141c77d1aaf927296b9e8e1e6d761cf7a6",
-  "plugin_version": "5.0.5",
+  "commit": "5a991e87847391f883e5668299424195dd1bef96",
+  "plugin_version": "5.0.6",
   "shared_modules": [
     "__init__.py",
     "_qt_callbacks.py",

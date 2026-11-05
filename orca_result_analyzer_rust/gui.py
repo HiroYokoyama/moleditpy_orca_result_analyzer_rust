@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtGui import QAction, QIcon, QDesktopServices
-from PySide6.QtCore import QSize, Qt, QObject, QEvent, QUrl
+from PySide6.QtCore import QSize, Qt, QObject, QEvent, QTimer, QUrl
 from .loading import load_orca_parser
 from .parser import IMAGINARY_FREQ_THRESHOLD
 from .utils import (
@@ -30,6 +30,21 @@ from .utils import (
     sync_main_window_file,
     notify,
 )
+
+
+def accept_drop_as_copy(event) -> bool:
+    """Accept a file drag as a copy. False, and refused, if the source cannot copy.
+
+    Never acceptProposedAction(): Shift during a drag from Explorer proposes a
+    move, and accepting one tells Explorer the file now lives here, so it removes
+    the original. A dropped file is only ever read.
+    """
+    if not event.possibleActions() & Qt.DropAction.CopyAction:
+        event.ignore()
+        return False
+    event.setDropAction(Qt.DropAction.CopyAction)
+    event.accept()
+    return True
 
 
 class _ClickFilter(QObject):
@@ -251,20 +266,29 @@ class OrcaResultAnalyzerDialog(QDialog):
             for url in mime.urls():
                 local = url.toLocalFile()
                 if os.path.isdir(local) or local.lower().endswith(".out"):
-                    event.acceptProposedAction()
+                    accept_drop_as_copy(event)
                     return
         event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
 
     def dropEvent(self, event):
         """Open a dropped folder via the file picker, or load a dropped .out directly."""
         for url in event.mimeData().urls():
             local = url.toLocalFile()
             if os.path.isdir(local):
-                self._open_directory_path(local)
-                return
-            if local.lower().endswith(".out") and os.path.isfile(local):
-                self.load_file(local)
-                return
+                open_it = self._open_directory_path
+            elif local.lower().endswith(".out") and os.path.isfile(local):
+                open_it = self.load_file
+            else:
+                continue
+            # After the drop returns: opening can show a modal picker or message,
+            # and the file manager stays frozen until this handler ends.
+            if accept_drop_as_copy(event):
+                QTimer.singleShot(0, self, lambda p=local, f=open_it: f(p))
+            return
+        event.ignore()
 
     def _open_directory_path(self, directory: str):
         """Run the Select-from-Directory picker for a specific *directory*."""
