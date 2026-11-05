@@ -1,8 +1,8 @@
 # Python版との同期範囲
 
-同期元: [ORCA Result Analyzer 5.0.5](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/a874b4141c77d1aaf927296b9e8e1e6d761cf7a6)
+同期元: [ORCA Result Analyzer 5.0.6](https://github.com/HiroYokoyama/moleditpy_orca_result_analyzer_plugin/tree/5a991e87847391f883e5668299424195dd1bef96)
 
-コミット: `a874b4141c77d1aaf927296b9e8e1e6d761cf7a6`。
+コミット: `5a991e87847391f883e5668299424195dd1bef96`。
 「同一」は改行コードと `orca_result_analyzer` → `orca_result_analyzer_rust`
 のパッケージ名置換を除いた全文一致を意味します。UIや解析の変更は原則として
 Python版で行い、共通ファイルをコピーして維持します。
@@ -92,7 +92,7 @@ Python版のテストを弱めたり、Rust版に合わない数値検証を削�
   科学表記、SCFスキャン番号、未完了サイクルのエネルギー、CHELPG/RESP見出しを同期。
 - `crates/orca_mo_rs/src/mo_engine.rs`: 数値計算の実装を維持。共有の球面調和関数・
   正規化・直交性・節の角度・実MO cube比較テストを適用します。
-- Rust crateとプラグインのバージョンは今回5.0.5に揃えています。
+- Rust crateとプラグインのバージョンは今回5.0.6に揃えています。
 
 ## 同期チェック
 

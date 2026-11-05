@@ -6,6 +6,7 @@ of results and directories, the directory picker widget, and the file menu
 actions (reload, open output, open directory).
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -275,16 +276,32 @@ def _drop_event(paths):
     return ev
 
 
+@contextlib.contextmanager
+def _deferred():
+    """Hold what the drop queues for later; call the result to run it."""
+    queued = []
+
+    def run():
+        for call in queued:
+            call.args[-1]()
+
+    with patch.object(G.QTimer, "singleShot") as single_shot:
+        queued = single_shot.call_args_list
+        yield run
+
+
 class TestDragAndDrop(_GuiCase):
     def test_an_output_file_is_accepted(self):
         ev = _drop_event([os.path.join(self.tmp, "other.out")])
         self.dlg.dragEnterEvent(ev)
-        ev.acceptProposedAction.assert_called_once()
+        ev.setDropAction.assert_called_once_with(G.Qt.DropAction.CopyAction)
+        ev.accept.assert_called_once()
 
     def test_a_directory_is_accepted(self):
         ev = _drop_event([self.tmp])
         self.dlg.dragEnterEvent(ev)
-        ev.acceptProposedAction.assert_called_once()
+        ev.setDropAction.assert_called_once_with(G.Qt.DropAction.CopyAction)
+        ev.accept.assert_called_once()
 
     def test_an_unrelated_file_is_refused(self):
         ev = _drop_event([os.path.join(self.tmp, "notes.txt")])
@@ -300,13 +317,17 @@ class TestDragAndDrop(_GuiCase):
         target = os.path.join(self.tmp, "dropped.out")
         with open(target, "w", encoding="utf-8") as fh:
             fh.write("x")
-        with patch.object(self.dlg, "load_file") as load:
+        with patch.object(self.dlg, "load_file") as load, _deferred() as run:
             self.dlg.dropEvent(_drop_event([target]))
+            load.assert_not_called()
+            run()
         load.assert_called_once_with(target)
 
     def test_dropping_a_directory_opens_the_picker(self):
-        with patch.object(self.dlg, "_open_directory_path") as open_dir:
+        with patch.object(self.dlg, "_open_directory_path") as open_dir, _deferred() as run:
             self.dlg.dropEvent(_drop_event([self.tmp]))
+            open_dir.assert_not_called()
+            run()
         open_dir.assert_called_once_with(self.tmp)
 
     def test_dropping_an_unrelated_file_does_nothing(self):
@@ -320,9 +341,37 @@ class TestDragAndDrop(_GuiCase):
         for p in (first, second):
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write("x")
-        with patch.object(self.dlg, "load_file") as load:
+        with patch.object(self.dlg, "load_file") as load, _deferred() as run:
             self.dlg.dropEvent(_drop_event([first, second]))
+            run()
         load.assert_called_once_with(first)
+
+    def test_a_drop_is_answered_as_a_copy_before_anything_opens(self):
+        target = os.path.join(self.tmp, "copy.out")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        ev = _drop_event([target])
+        with patch.object(self.dlg, "load_file") as load, _deferred() as run:
+            self.dlg.dropEvent(ev)
+            ev.setDropAction.assert_called_once_with(G.Qt.DropAction.CopyAction)
+            ev.accept.assert_called_once()
+            ev.acceptProposedAction.assert_not_called()
+            load.assert_not_called()
+            run()
+        load.assert_called_once_with(target)
+
+    def test_a_source_that_can_only_move_is_refused(self):
+        target = os.path.join(self.tmp, "moved.out")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        ev = _drop_event([target])
+        ev.possibleActions.return_value.__and__.return_value = 0
+        with patch.object(self.dlg, "load_file") as load, _deferred() as run:
+            self.dlg.dropEvent(ev)
+            run()
+        ev.ignore.assert_called_once()
+        ev.accept.assert_not_called()
+        load.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

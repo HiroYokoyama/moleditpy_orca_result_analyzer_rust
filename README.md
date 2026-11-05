@@ -11,7 +11,7 @@
 A comprehensive plugin for MoleditPy to analyze and visualize results from ORCA quantum chemistry calculations.
 
 This edition synchronizes its UI, analysis features and complete test suite with
-Python plugin **5.0.5**, commit `a874b4141c77d1aaf927296b9e8e1e6d761cf7a6`.
+Python plugin **5.0.6**, commit `5a991e87847391f883e5668299424195dd1bef96`.
 The bulk output parser and MO grid evaluator remain compiled Rust extensions.
 Shared Python mixins provide helper APIs and NBO/spin parsing. See
 [PYTHON_SYNC.md](PYTHON_SYNC.md) for the file-by-file classification and
@@ -237,7 +237,7 @@ python run_tests.py tests/ -p pytest_cov --cov=orca_result_analyzer_rust --cov-r
 Build the extensions first. The runner disables pytest plugin autoload so a local
 pytest-qt installation cannot replace the headless Qt test stubs. Coverage reports
 Python wrappers/UI only; the native Rust numerical assertions are separate tests.
-The build-artifact and plugin versions are aligned at 5.0.5 for this synchronization.
+The build-artifact and plugin versions are aligned at 5.0.6 for this synchronization.
 
 This edition retains its existing GPLv3 license. Synced LGPL source and dependency
 notices are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
